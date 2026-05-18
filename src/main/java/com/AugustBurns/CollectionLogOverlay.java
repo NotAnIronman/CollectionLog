@@ -22,9 +22,8 @@ import java.awt.Rectangle;
 import java.awt.RenderingHints;
 import java.awt.Shape;
 import java.awt.image.BufferedImage;
-import okhttp3.OkHttpClient;
-import okhttp3.Request;
-import okhttp3.Response;
+import java.net.HttpURLConnection;
+import java.net.URL;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -44,6 +43,11 @@ public class CollectionLogOverlay extends Overlay
     // ======== DIMENSIONS ========
     private static final int PANEL_WIDTH = 400;
     private static final int PANEL_HEIGHT = 440;
+    private static final int MIN_PANEL_WIDTH = 300;
+    private static final int MIN_PANEL_HEIGHT = 280;
+    private static final int MAX_PANEL_WIDTH = 700;
+    private static final int MAX_PANEL_HEIGHT = 800;
+    private static final int RESIZE_HANDLE_SIZE = 14;
     private static final int HEADER_HEIGHT = 36;
     private static final int SEARCH_BAR_HEIGHT = 28;
     private static final int SECTION_HEIGHT = 26;
@@ -82,6 +86,13 @@ public class CollectionLogOverlay extends Overlay
     private static final Color ROW_ALT_BG = new Color(35, 30, 22, 100);
     private static final Color COUNT_COLOR = new Color(180, 170, 140);
     private static final Color FOOTER_COLOR = new Color(140, 130, 110);
+    private static final Color RESIZE_HANDLE_COLOR = new Color(109, 96, 73, 180);
+    private static final Color RESIZE_HANDLE_HOVER = new Color(180, 160, 120, 220);
+    private static final Color TOOLTIP_BG = new Color(20, 17, 12, 235);
+    private static final Color TOOLTIP_BORDER = new Color(109, 96, 73);
+    private static final Color TOOLTIP_TEXT = new Color(220, 210, 190);
+    private static final Color TOOLTIP_ACCENT = new Color(255, 203, 5);
+    private static final Color SECTION_COMPLETE = new Color(30, 200, 80);
 
     // Rarity colors
     private static final Color RATE_ALWAYS = new Color(30, 200, 80);
@@ -102,9 +113,6 @@ public class CollectionLogOverlay extends Overlay
 
     @Inject
     private CollectionPluginConfig config;
-
-    @Inject
-    private OkHttpClient httpClient;
 
     // Passed from plugin (not injected - injection doesn't resolve reliably in overlays)
     private ItemManager itemManager;
@@ -167,6 +175,21 @@ public class CollectionLogOverlay extends Overlay
     // Custom position (Alt+drag). -1 means centered (default).
     private int customX = -1;
     private int customY = -1;
+
+    // Custom size (Alt+resize). -1 means use default PANEL_WIDTH/HEIGHT.
+    private int customW = -1;
+    private int customH = -1;
+
+    // Tracks which drop item the mouse is currently hovering over (for dry-streak tooltip)
+    private int hoveredSectionIdx = -1;
+    private int hoveredItemIdx = -1;
+    private Point lastMousePoint = null;
+
+    // Resize handle bounds (bottom-right corner grip)
+    private Rectangle resizeHandleBounds;
+
+    // Whether to show completion counts on section headers (read from config each render)
+    private boolean showCompletionCount = false;
 
     // Click-to-toggle obtained
     private Runnable dataChangedCallback;
@@ -238,8 +261,15 @@ public class CollectionLogOverlay extends Overlay
 
         int canvasW = client.getCanvasWidth();
         int canvasH = client.getCanvasHeight();
-        int panelW = Math.min(PANEL_WIDTH, canvasW - 30);
-        int panelH = Math.min(PANEL_HEIGHT, canvasH - 30);
+
+        // Use custom size if set, otherwise default dimensions
+        int panelW = (customW > 0) ? Math.max(MIN_PANEL_WIDTH, Math.min(customW, Math.min(MAX_PANEL_WIDTH, canvasW - 30)))
+                                   : Math.min(PANEL_WIDTH, canvasW - 30);
+        int panelH = (customH > 0) ? Math.max(MIN_PANEL_HEIGHT, Math.min(customH, Math.min(MAX_PANEL_HEIGHT, canvasH - 30)))
+                                   : Math.min(PANEL_HEIGHT, canvasH - 30);
+
+        // Read config flags fresh each frame
+        showCompletionCount = config.showCompletionCount();
 
         int panelX, panelY;
         if (customX >= 0 && customY >= 0)
@@ -292,6 +322,23 @@ public class CollectionLogOverlay extends Overlay
         if (searchFocused && searchText.length() > 0)
         {
             renderSearchSuggestions(g, panelX + 1, searchY + SEARCH_BAR_HEIGHT, panelW - 2);
+        }
+
+        // Resize handle (bottom-right corner) — always visible when overlay is shown
+        renderResizeHandle(g, panelX + panelW - RESIZE_HANDLE_SIZE, panelY + panelH - RESIZE_HANDLE_SIZE);
+
+        // Dry-streak tooltip for hovered drop item
+        if (state == State.SHOWING && dropData != null && hoveredSectionIdx >= 0)
+        {
+            List<NpcDropData.DropSection> sections = dropData.getSections();
+            if (hoveredSectionIdx < sections.size())
+            {
+                List<NpcDropData.DropItem> items = sections.get(hoveredSectionIdx).getItems();
+                if (hoveredItemIdx < items.size())
+                {
+                    renderDryStreakTooltip(g, items.get(hoveredItemIdx), canvasW, canvasH);
+                }
+            }
         }
 
         return new Dimension(panelW, panelH);
@@ -539,6 +586,10 @@ public class CollectionLogOverlay extends Overlay
         Shape oldClip = g.getClip();
         g.setClip(contentX, contentY, contentW, contentH);
 
+        // Reset hover tracking each frame; renderDropItem re-sets it if mouse is over a row
+        hoveredSectionIdx = -1;
+        hoveredItemIdx = -1;
+
         Font sectionFont = FontManager.getRunescapeBoldFont();
         Font itemFont = FontManager.getRunescapeSmallFont();
 
@@ -687,9 +738,42 @@ public class CollectionLogOverlay extends Overlay
         }
 
         FontMetrics fm = g.getFontMetrics();
-        String countStr = "(" + section.getItems().size() + ")";
-        g.setColor(partyMode ? partyColor(itemIndex * 0.05f + 0.4f) : COUNT_COLOR);
-        g.drawString(countStr, textX + fm.stringWidth(section.getName()) + 6, y + SECTION_HEIGHT - 9);
+        int nameWidth = fm.stringWidth(section.getName());
+
+        // Build the count badge string
+        String countStr;
+        boolean sectionComplete = false;
+        if (showCompletionCount && !partyMode)
+        {
+            int total = section.getItems().size();
+            int obtained = 0;
+            for (NpcDropData.DropItem item : section.getItems())
+            {
+                if (item.isObtained()) obtained++;
+            }
+            sectionComplete = (obtained == total && total > 0);
+            countStr = "(" + obtained + "/" + total + ")";
+        }
+        else
+        {
+            countStr = "(" + section.getItems().size() + ")";
+        }
+
+        Color countColor;
+        if (partyMode)
+        {
+            countColor = partyColor(itemIndex * 0.05f + 0.4f);
+        }
+        else if (sectionComplete)
+        {
+            countColor = SECTION_COMPLETE;
+        }
+        else
+        {
+            countColor = COUNT_COLOR;
+        }
+        g.setColor(countColor);
+        g.drawString(countStr, textX + nameWidth + 6, y + SECTION_HEIGHT - 9);
 
         if (y >= clipTop && y + SECTION_HEIGHT <= clipBottom)
         {
@@ -751,6 +835,14 @@ public class CollectionLogOverlay extends Overlay
 
         itemClickAreas.add(new ItemClickArea(sectionIdx, itemIdx,
                 new Rectangle(iconX - 2, iconY - 2, ICON_SIZE + 4, ICON_SIZE + 4)));
+
+        // Track row hover for dry-streak tooltip
+        Rectangle rowRect = new Rectangle(x + 4, y, w - 8, ROW_HEIGHT - 1);
+        if (lastMousePoint != null && rowRect.contains(lastMousePoint))
+        {
+            hoveredSectionIdx = sectionIdx;
+            hoveredItemIdx = itemIdx;
+        }
 
         g.setFont(font);
         FontMetrics fm = g.getFontMetrics();
@@ -836,8 +928,126 @@ public class CollectionLogOverlay extends Overlay
     }
 
     // ================================================================
-    //  CENTERED TEXT (loading/error states)
+    //  RESIZE HANDLE
     // ================================================================
+
+    private void renderResizeHandle(Graphics2D g, int hx, int hy)
+    {
+        resizeHandleBounds = new Rectangle(hx, hy, RESIZE_HANDLE_SIZE, RESIZE_HANDLE_SIZE);
+
+        boolean hovered = lastMousePoint != null && resizeHandleBounds.contains(lastMousePoint);
+        Color handleColor = hovered ? RESIZE_HANDLE_HOVER : RESIZE_HANDLE_COLOR;
+
+        // Draw three diagonal lines in the corner as a classic resize grip
+        g.setColor(handleColor);
+        g.setStroke(new BasicStroke(1.5f));
+        for (int i = 1; i <= 3; i++)
+        {
+            int offset = i * 4;
+            g.drawLine(hx + RESIZE_HANDLE_SIZE - offset, hy + RESIZE_HANDLE_SIZE,
+                       hx + RESIZE_HANDLE_SIZE,          hy + RESIZE_HANDLE_SIZE - offset);
+        }
+        g.setStroke(new BasicStroke(1.0f));
+    }
+
+    // ================================================================
+    //  DRY-STREAK TOOLTIP
+    // ================================================================
+
+    /**
+     * Renders a dry-streak probability tooltip near the mouse cursor.
+     * Uses the binomial formula P(X >= 1) = 1 - (1-p)^n where p = drop chance
+     * and n = tracked kill count for this NPC.
+     */
+    private void renderDryStreakTooltip(Graphics2D g, NpcDropData.DropItem item, int canvasW, int canvasH)
+    {
+        double p = parseDropProbability(item.getRarity());
+        int n = dropData.getKillCount();
+
+        if (p <= 0 || n <= 0 || lastMousePoint == null)
+        {
+            return;
+        }
+
+        double dryProbability = 1.0 - Math.pow(1.0 - p, n);
+        int percent = (int) Math.round(dryProbability * 100);
+
+        String line1 = item.getName() + " @ " + item.getRarity();
+        String line2 = n + " kills  \u2192  " + percent + "% chance of >=1 drop";
+        String line3 = percent < 100 ? "(" + (100 - percent) + "% still dry)" : "(Should have dropped by now!)";
+
+        Font font = FontManager.getRunescapeSmallFont();
+        g.setFont(font);
+        FontMetrics fm = g.getFontMetrics();
+
+        int padX = 8;
+        int padY = 5;
+        int lineH = fm.getHeight() + 2;
+        int tipW = Math.max(fm.stringWidth(line1), Math.max(fm.stringWidth(line2), fm.stringWidth(line3))) + padX * 2;
+        int tipH = lineH * 3 + padY * 2;
+
+        // Position tooltip above cursor, constrained to canvas
+        int tipX = lastMousePoint.x + 10;
+        int tipY = lastMousePoint.y - tipH - 8;
+        if (tipX + tipW > canvasW - 4) tipX = canvasW - tipW - 4;
+        if (tipY < 4) tipY = lastMousePoint.y + 16;
+
+        // Shadow
+        g.setColor(new Color(0, 0, 0, 100));
+        g.fillRoundRect(tipX + 2, tipY + 2, tipW, tipH, 6, 6);
+
+        // Background and border
+        g.setColor(TOOLTIP_BG);
+        g.fillRoundRect(tipX, tipY, tipW, tipH, 6, 6);
+        g.setColor(TOOLTIP_BORDER);
+        g.drawRoundRect(tipX, tipY, tipW, tipH, 6, 6);
+
+        // Text
+        int tx = tipX + padX;
+        int ty = tipY + padY + fm.getAscent();
+
+        g.setColor(TOOLTIP_ACCENT);
+        g.drawString(line1, tx, ty);
+        ty += lineH;
+
+        g.setColor(TOOLTIP_TEXT);
+        g.drawString(line2, tx, ty);
+        ty += lineH;
+
+        Color dryColor = percent >= 99 ? new Color(255, 100, 80)
+                       : percent >= 63 ? new Color(255, 165, 50)
+                       : new Color(140, 200, 140);
+        g.setColor(dryColor);
+        g.drawString(line3, tx, ty);
+    }
+
+    /**
+     * Converts a rarity string to a probability in [0, 1].
+     * Returns -1 if the rarity cannot be parsed (e.g. "Always", "Unknown").
+     */
+    private double parseDropProbability(String rarity)
+    {
+        if (rarity == null) return -1;
+        String lower = rarity.toLowerCase();
+        if (lower.equals("always")) return 1.0;
+        if (lower.equals("common")) return 1.0 / 8;
+        if (lower.equals("uncommon")) return 1.0 / 32;
+        if (lower.equals("rare")) return 1.0 / 128;
+        if (lower.equals("very rare")) return 1.0 / 512;
+
+        if (rarity.contains("/"))
+        {
+            try
+            {
+                String[] parts = rarity.split("/");
+                double num = Double.parseDouble(parts[0].trim());
+                double den = Double.parseDouble(parts[1].trim());
+                if (den > 0) return num / den;
+            }
+            catch (NumberFormatException ignored) {}
+        }
+        return -1;
+    }
 
     private void renderCenteredText(Graphics2D g, String text, Color color, int x, int y, int w, int h)
     {
@@ -941,24 +1151,19 @@ public class CollectionLogOverlay extends Overlay
         pendingImageDownloads.add(imageUrl);
         imageDownloadExecutor.submit(() ->
         {
-            Request request = new Request.Builder()
-                    .url(imageUrl)
-                    .header("User-Agent", "RuneLite-collectionlogexpanded/1.0")
-                    .build();
-
-            try (Response response = httpClient.newCall(request).execute())
+            try
             {
-                if (response.isSuccessful() && response.body() != null)
+                URL url = new URL(imageUrl);
+                HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+                conn.setRequestProperty("User-Agent", "RuneLite-collectionlogexpanded/1.0");
+                conn.setConnectTimeout(5000);
+                conn.setReadTimeout(5000);
+                BufferedImage img = ImageIO.read(conn.getInputStream());
+                conn.disconnect();
+
+                if (img != null)
                 {
-                    BufferedImage img = ImageIO.read(response.body().byteStream());
-                    if (img != null)
-                    {
-                        wikiImageCache.put(imageUrl, img);
-                    }
-                    else
-                    {
-                        failedImageUrls.add(imageUrl);
-                    }
+                    wikiImageCache.put(imageUrl, img);
                 }
                 else
                 {
@@ -1491,6 +1696,62 @@ public class CollectionLogOverlay extends Overlay
     public int getCustomY()
     {
         return customY;
+    }
+
+    /**
+     * Sets a custom size for the overlay panel.
+     * Clamped to [MIN, MAX] at render time.
+     */
+    public void setCustomSize(int w, int h)
+    {
+        this.customW = Math.max(MIN_PANEL_WIDTH, w);
+        this.customH = Math.max(MIN_PANEL_HEIGHT, h);
+    }
+
+    public void resetSize()
+    {
+        this.customW = -1;
+        this.customH = -1;
+    }
+
+    public int getCustomWidth()
+    {
+        return customW;
+    }
+
+    public int getCustomHeight()
+    {
+        return customH;
+    }
+
+    /** Returns the actual rendered pixel width of the panel this frame. */
+    public int getCurrentWidth()
+    {
+        return bounds != null ? bounds.width : (customW > 0 ? customW : PANEL_WIDTH);
+    }
+
+    /** Returns the actual rendered pixel height of the panel this frame. */
+    public int getCurrentHeight()
+    {
+        return bounds != null ? bounds.height : (customH > 0 ? customH : PANEL_HEIGHT);
+    }
+
+    /**
+     * Returns true if the point is on the resize handle (bottom-right corner grip).
+     * Only valid when the overlay is visible.
+     */
+    public boolean isOnResizeHandle(Point point)
+    {
+        return resizeHandleBounds != null && resizeHandleBounds.contains(point);
+    }
+
+    /**
+     * Call from CollectionPlugin.mouseMoved to update the tracked mouse position
+     * so the tooltip and resize handle hover state work correctly.
+     */
+    public void updateMousePosition(Point p)
+    {
+        this.lastMousePoint = p;
     }
 
     public Rectangle getCurrentBounds()

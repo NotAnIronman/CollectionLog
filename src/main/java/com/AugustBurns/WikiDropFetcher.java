@@ -562,6 +562,9 @@ public class WikiDropFetcher
                 }
                 if (itemName == null || itemName.isEmpty()) continue;
 
+                // Modern OSRS drops Clue scroll boxes, not raw clue scrolls
+                itemName = normalizeClueScrollName(itemName);
+
                 // Cell 2 (index 2): quantity (strip HTML tags, decode entities)
                 String quantity = decodeHtmlEntities(cells.get(2).replaceAll("<[^>]*>", "").trim());
                 quantity = quantity.replace(",", "");
@@ -776,6 +779,9 @@ public class WikiDropFetcher
 
         name = name.replaceAll("\\[\\[([^\\]|]+)(\\|[^\\]]+)?\\]\\]", "$1");
 
+        // Modern OSRS drops Clue scroll boxes, not raw clue scrolls
+        name = normalizeClueScrollName(name);
+
         String quantity = params.getOrDefault("quantity", "1").trim();
         quantity = quantity.replaceAll("\\{\\{[^}]*\\}\\}", "").trim();
         if (quantity.isEmpty()) quantity = "1";
@@ -873,6 +879,30 @@ public class WikiDropFetcher
         text = text.replace('\u00A0', ' ').trim();
 
         return text;
+    }
+
+    /**
+     * Renames legacy "Clue scroll (difficulty)" entries to "Clue scroll box (difficulty)"
+     * to reflect the modern OSRS drop mechanic (monsters drop caskets/boxes, not raw scrolls).
+     * Only renames the four variable-difficulty scrolls; "Clue scroll (beginner)" dropped by
+     * specific monsters directly is left unchanged.
+     */
+    private String normalizeClueScrollName(String name)
+    {
+        if (name == null) return null;
+        // Match "Clue scroll (easy/medium/hard/elite)" — case-insensitive
+        if (name.matches("(?i)Clue scroll \\((easy|medium|hard|elite)\\)"))
+        {
+            // Extract the difficulty word and rebuild as a box name
+            int open = name.indexOf('(');
+            int close = name.indexOf(')');
+            if (open >= 0 && close > open)
+            {
+                String difficulty = name.substring(open + 1, close);
+                return "Clue scroll box (" + difficulty.toLowerCase() + ")";
+            }
+        }
+        return name;
     }
 
     private String cleanRarity(String rarity)

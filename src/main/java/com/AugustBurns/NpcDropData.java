@@ -12,6 +12,8 @@ public class NpcDropData
     private String npcName;
     private long fetchedAt;
     private List<DropSection> sections;
+    /** Total confirmed kills tracked via loot events. Used for dry-streak probability. */
+    private int killCount;
 
     public NpcDropData()
     {
@@ -63,6 +65,21 @@ public class NpcDropData
             count += section.getItems().size();
         }
         return count;
+    }
+
+    public int getKillCount()
+    {
+        return killCount;
+    }
+
+    public void setKillCount(int killCount)
+    {
+        this.killCount = killCount;
+    }
+
+    public void incrementKillCount()
+    {
+        this.killCount++;
     }
 
     /**

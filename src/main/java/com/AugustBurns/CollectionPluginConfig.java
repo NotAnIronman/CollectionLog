@@ -70,6 +70,18 @@ public interface CollectionPluginConfig extends Config
         return false;
     }
 
+    @ConfigItem(
+        keyName = "showCompletionCount",
+        name = "Show Completion Count (#/#)",
+        description = "Show obtained/total counts next to section headers, and turn the header green when the section is complete",
+        section = displaySection,
+        position = 1
+    )
+    default boolean showCompletionCount()
+    {
+        return false;
+    }
+
     @ConfigSection(
         name = "Cache",
         description = "Control how drop data is cached locally",

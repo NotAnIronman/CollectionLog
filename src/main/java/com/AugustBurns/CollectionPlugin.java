@@ -66,6 +66,8 @@ public class CollectionPlugin extends Plugin
     private static final String CONFIG_GROUP = "collectionlogexpanded";
     private static final String CONFIG_POS_X = "overlayPosX";
     private static final String CONFIG_POS_Y = "overlayPosY";
+    private static final String CONFIG_SIZE_W = "overlaySizeW";
+    private static final String CONFIG_SIZE_H = "overlaySizeH";
 
     @Inject
     private Client client;
@@ -121,12 +123,19 @@ public class CollectionPlugin extends Plugin
     private final Map<String, Integer> recentNpcIds = new ConcurrentHashMap<>();
 
 
-    // Alt+drag state
+    // Alt+drag state (move)
     private boolean altDragging = false;
     private int dragStartMouseX;
     private int dragStartMouseY;
     private int dragStartPanelX;
     private int dragStartPanelY;
+
+    // Alt+drag state (resize) — triggered when Alt+left-click lands on the resize handle
+    private boolean altResizing = false;
+    private int resizeStartMouseX;
+    private int resizeStartMouseY;
+    private int resizeStartW;
+    private int resizeStartH;
 
     @Override
     protected void startUp()
@@ -199,6 +208,7 @@ public class CollectionPlugin extends Plugin
         recentNpcIds.clear();
         monsterNameCache.clear();
         altDragging = false;
+        altResizing = false;
 
         log.debug("Collection Log Expanded stopped");
     }
@@ -564,6 +574,23 @@ public class CollectionPlugin extends Plugin
         {
             String npcName = cleanNpcName(event.getTarget());
 
+            // Only add "Collection Log" for NPCs that have a combat level.
+            // Non-combat NPCs (shopkeepers, bankers, quest NPCs, etc.) have combatLevel == 0
+            // and never have drop tables on the wiki.
+            NPC matchedNpc = null;
+            for (NPC npc : client.getNpcs())
+            {
+                if (npc != null && npcName.equalsIgnoreCase(npc.getName()))
+                {
+                    matchedNpc = npc;
+                    break;
+                }
+            }
+            if (matchedNpc == null || matchedNpc.getCombatLevel() <= 0)
+            {
+                return;
+            }
+
             // Look up the NPC composition ID from our spawn tracker
             int npcId = recentNpcIds.getOrDefault(npcName.toLowerCase(), -1);
 
@@ -700,6 +727,18 @@ public class CollectionPlugin extends Plugin
 
             log.debug("Updated obtained items for {}", npcName);
         }
+
+        // Always increment kill count for any NPC we have cached drop data for.
+        // A loot event reliably signals one kill even if no new drops were obtained.
+        cached.incrementKillCount();
+        cacheManager.saveToCache(cached);
+
+        if (overlay.isVisible()
+                && overlay.getDropData() != null
+                && npcName.equalsIgnoreCase(overlay.getDropData().getNpcName()))
+        {
+            clientThread.invokeLater(() -> overlay.updateDropData(cached));
+        }
     }
 
     // ================================================================
@@ -781,11 +820,24 @@ public class CollectionPlugin extends Plugin
         if (altDown && e.getButton() == MouseEvent.BUTTON3 && overlay.isInBounds(point))
         {
             overlay.resetPosition();
+            overlay.resetSize();
             savePosition();
+            saveSize();
             return null;
         }
 
-        // Alt + left-click on overlay = start dragging
+        // Alt + left-click on overlay resize handle = start resizing
+        if (altDown && e.getButton() == MouseEvent.BUTTON1 && overlay.isOnResizeHandle(point))
+        {
+            altResizing = true;
+            resizeStartMouseX = point.x;
+            resizeStartMouseY = point.y;
+            resizeStartW = overlay.getCurrentWidth();
+            resizeStartH = overlay.getCurrentHeight();
+            return null;
+        }
+
+        // Alt + left-click on overlay (not resize handle) = start dragging
         if (altDown && e.getButton() == MouseEvent.BUTTON1 && overlay.isInBounds(point))
         {
             altDragging = true;
@@ -835,6 +887,14 @@ public class CollectionPlugin extends Plugin
         if (!overlay.isVisible()) return e;
         if (e.getButton() == MouseEvent.BUTTON2) return e;
 
+        // End Alt+resize
+        if (altResizing)
+        {
+            altResizing = false;
+            saveSize();
+            return null;
+        }
+
         // End Alt+drag
         if (altDragging)
         {
@@ -860,6 +920,17 @@ public class CollectionPlugin extends Plugin
         if (!overlay.isVisible()) return e;
         if ((e.getModifiersEx() & MouseEvent.BUTTON2_DOWN_MASK) != 0) return e;
 
+        overlay.updateMousePosition(e.getPoint());
+
+        // Alt+resize drags the bottom-right corner
+        if (altResizing)
+        {
+            int dx = e.getPoint().x - resizeStartMouseX;
+            int dy = e.getPoint().y - resizeStartMouseY;
+            overlay.setCustomSize(resizeStartW + dx, resizeStartH + dy);
+            return null;
+        }
+
         // Alt+drag moves the overlay window
         if (altDragging)
         {
@@ -874,7 +945,14 @@ public class CollectionPlugin extends Plugin
     }
 
     @Override
-    public MouseEvent mouseMoved(MouseEvent e) { return e; }
+    public MouseEvent mouseMoved(MouseEvent e)
+    {
+        if (overlay.isVisible())
+        {
+            overlay.updateMousePosition(e.getPoint());
+        }
+        return e;
+    }
 
     // ================================================================
     //  MOUSE WHEEL
@@ -1114,6 +1192,16 @@ public class CollectionPlugin extends Plugin
                 overlay.setCustomPosition(x, y);
                 log.debug("Loaded saved overlay position: {}, {}", x, y);
             }
+
+            String wStr = configManager.getConfiguration(CONFIG_GROUP, CONFIG_SIZE_W);
+            String hStr = configManager.getConfiguration(CONFIG_GROUP, CONFIG_SIZE_H);
+            if (wStr != null && hStr != null)
+            {
+                int w = Integer.parseInt(wStr);
+                int h = Integer.parseInt(hStr);
+                overlay.setCustomSize(w, h);
+                log.debug("Loaded saved overlay size: {}x{}", w, h);
+            }
         }
         catch (NumberFormatException ignored)
         {
@@ -1126,6 +1214,17 @@ public class CollectionPlugin extends Plugin
         int y = overlay.getCustomY();
         configManager.setConfiguration(CONFIG_GROUP, CONFIG_POS_X, String.valueOf(x));
         configManager.setConfiguration(CONFIG_GROUP, CONFIG_POS_Y, String.valueOf(y));
+    }
+
+    private void saveSize()
+    {
+        int w = overlay.getCustomWidth();
+        int h = overlay.getCustomHeight();
+        if (w > 0 && h > 0)
+        {
+            configManager.setConfiguration(CONFIG_GROUP, CONFIG_SIZE_W, String.valueOf(w));
+            configManager.setConfiguration(CONFIG_GROUP, CONFIG_SIZE_H, String.valueOf(h));
+        }
     }
 
     // ================================================================
