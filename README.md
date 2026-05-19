@@ -11,7 +11,7 @@
 * Easter Eggs?  
 
 ## Update V1.1 - 05/18/26
-* Added ability to resize window
+* Added ability to resize window, to resize, hold Alt, and drag bottom right corner.
 * Only enemies with a combat level show the "Collection Log" menu entry
 * Ability to show Completion Count (change in settings)
 
