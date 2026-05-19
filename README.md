@@ -22,6 +22,7 @@
 * Add color themes
 * Opacity slider for background and foreground elements
 * Show tracked killcount
+* Toggle to require Shift click to see collection log option
 
 If you have any ideas for a plugin, please let me know by either messaging me ingame @ "The Riptide"
 or commenting on my reddit posts.
