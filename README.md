@@ -10,6 +10,22 @@
 * Side panel  
 * Easter Eggs?  
 
+## Update V1.1 - 05/18/26
+* Added ability to resize window
+* Only enemies with a combat level show the "Collection Log" menu entry
+* Ability to show Completion Count (change in settings)
+
+## Planned Updates
+* Better detection for enemies with multiple variants, such as Hobgoblins
+* Ability to see your dry percentage (toggle)
+* Fix clue scrolls
+* Add color themes
+* Opacity slider for background and foreground elements
+* Show tracked killcount
+
+If you have any ideas for a plugin, please let me know by either messaging me ingame @ "The Riptide"
+or commenting on my reddit posts.
+
 ## FAQ
 * Q: Why are some kills on an NPC not showing in the log?  
  A: You must first open a collection log for an NPC before you can populate it.
@@ -25,6 +41,9 @@
 
 ### Collection Log filled in with drops  
 ![CollectionLogFilled](src/test/resources/CollectionLogFilled.png)
+
+### Collection completion Count
+![CollectionLogFilled](src/test/resources/CollectionLogCompletion.png)
 
 ## Credits -
 ***August Burns - Lead Engineer***  
