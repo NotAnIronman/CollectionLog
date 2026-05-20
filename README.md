@@ -15,14 +15,22 @@
 * Only enemies with a combat level show the "Collection Log" menu entry
 * Ability to show Completion Count (change in settings)
 
-## Planned Updates
-* Better detection for enemies with multiple variants, such as Hobgoblins
+## Update V1.2 - 05/19/26
 * Ability to see your dry percentage (toggle)
-* Fix clue scrolls
-* Add color themes
-* Opacity slider for background and foreground elements
 * Show tracked killcount
 * Toggle to require Shift click to see collection log option
+* Opacity slider for background and foreground elements
+* Fix clue scrolls
+* Add color themes
+* Removed "Nothing" drop
+* Added "F2p" tag for drops only able to be obtained in F2p worlds
+* Fixed graphical issue with "-", when item has a range
+* Added ability to reset Cache manually
+* Added ability to auto-collapse completed sections of log
+* Added ability to automatically add all enemies you have seen to your drop log.
+  
+## Planned Updates
+* Better detection for enemies with multiple variants, such as Hobgoblins
 
 If you have any ideas for a plugin, please let me know by either messaging me ingame @ "The Riptide"
 or commenting on my reddit posts.
@@ -30,6 +38,7 @@ or commenting on my reddit posts.
 ## FAQ
 * Q: Why are some kills on an NPC not showing in the log?  
  A: You must first open a collection log for an NPC before you can populate it.
+ - Enable "auto add enemies" to fix this from happening
 
 
 * Q: How do I get rid of / reset a specific creature in my log?  
