@@ -43,10 +43,10 @@ public class CollectionLogOverlay extends Overlay
     // ======== DIMENSIONS ========
     private static final int PANEL_WIDTH = 400;
     private static final int PANEL_HEIGHT = 440;
-    private static final int MIN_PANEL_WIDTH = 300;
-    private static final int MIN_PANEL_HEIGHT = 280;
-    private static final int MAX_PANEL_WIDTH = 700;
-    private static final int MAX_PANEL_HEIGHT = 800;
+    private static final int MIN_PANEL_WIDTH = 100;
+    private static final int MIN_PANEL_HEIGHT = 100;
+    private static final int MAX_PANEL_WIDTH = 1500;
+    private static final int MAX_PANEL_HEIGHT = 1500;
     private static final int RESIZE_HANDLE_SIZE = 14;
     private static final int HEADER_HEIGHT = 36;
     private static final int SEARCH_BAR_HEIGHT = 28;
@@ -191,6 +191,18 @@ public class CollectionLogOverlay extends Overlay
     // Whether to show completion counts on section headers (read from config each render)
     private boolean showCompletionCount = false;
 
+    // ======== LIVE COLORS (refreshed from config each frame) ========
+    // These shadow the static constants so all rendering methods just use these fields.
+    private Color liveBgColor        = BG_COLOR;
+    private Color liveHeaderBgColor  = HEADER_BG;
+    private Color liveBorderColor    = BORDER_COLOR;
+    private Color liveTitleColor     = TITLE_COLOR;
+    private Color liveSectionColor   = SECTION_COLOR;
+    private Color liveItemColor      = ITEM_COLOR;
+    private Color liveObtainedColor  = ITEM_OBTAINED;
+    private float liveBgAlpha        = 1.0f;   // 0.0–1.0
+    private float liveFgAlpha        = 1.0f;   // applied per drop-row composite
+
     // Click-to-toggle obtained
     private Runnable dataChangedCallback;
 
@@ -270,6 +282,7 @@ public class CollectionLogOverlay extends Overlay
 
         // Read config flags fresh each frame
         showCompletionCount = config.showCompletionCount();
+        refreshLiveColors();
 
         int panelX, panelY;
         if (customX >= 0 && customY >= 0)
@@ -363,10 +376,12 @@ public class CollectionLogOverlay extends Overlay
             g.drawRoundRect(x - 1, y - 1, w + 2, h + 2, 6, 6);
         }
 
-        g.setColor(BG_COLOR);
+        // Apply background opacity from config
+        Color bgWithAlpha = withAlpha(liveBgColor, Math.round(liveBgAlpha * 255));
+        g.setColor(bgWithAlpha);
         g.fillRoundRect(x, y, w, h, 5, 5);
 
-        g.setColor(partyMode ? partyColor(0.5f) : BORDER_COLOR);
+        g.setColor(partyMode ? partyColor(0.5f) : liveBorderColor);
         g.drawRoundRect(x, y, w, h, 5, 5);
     }
 
@@ -376,10 +391,12 @@ public class CollectionLogOverlay extends Overlay
 
     private void renderHeader(Graphics2D g, int panelX, int panelY, int panelW)
     {
-        g.setColor(HEADER_BG);
+        // Header background uses the same opacity as the main background
+        Color headerWithAlpha = withAlpha(liveHeaderBgColor, Math.round(liveBgAlpha * 255));
+        g.setColor(headerWithAlpha);
         g.fillRect(panelX + 1, panelY + 1, panelW - 2, HEADER_HEIGHT);
 
-        g.setColor(partyMode ? partyColor(0.3f) : BORDER_COLOR);
+        g.setColor(partyMode ? partyColor(0.3f) : liveBorderColor);
         g.drawLine(panelX + 1, panelY + HEADER_HEIGHT, panelX + panelW - 1, panelY + HEADER_HEIGHT);
 
         Font titleFont = FontManager.getRunescapeBoldFont();
@@ -396,11 +413,16 @@ public class CollectionLogOverlay extends Overlay
         }
         int countBadgeWidth = countBadge.isEmpty() ? 0 : fm.stringWidth(countBadge) + 12;
 
-        // Title: centered between left edge and the badge+close area
+        // Title: "NpcName (1,234)" when kills are tracked (#5)
         int rightReserved = closeButtonWidth + countBadgeWidth + 6;
         int titleAreaLeft = panelX + PADDING + 2;
         int titleAreaWidth = panelW - PADDING - rightReserved - (titleAreaLeft - panelX);
+
         String title = npcName;
+        if (!partyMode && state == State.SHOWING && dropData != null && dropData.getKillCount() > 0)
+        {
+            title = npcName + " (" + String.format("%,d", dropData.getKillCount()) + ")";
+        }
         while (fm.stringWidth(title) > titleAreaWidth && title.length() > 4)
         {
             title = title.substring(0, title.length() - 4) + "...";
@@ -422,7 +444,7 @@ public class CollectionLogOverlay extends Overlay
         }
         else
         {
-            g.setColor(TITLE_COLOR);
+            g.setColor(liveTitleColor);
             g.drawString(title, titleX, titleY);
         }
 
@@ -437,14 +459,13 @@ public class CollectionLogOverlay extends Overlay
             int badgeX = panelX + panelW - closeButtonWidth - badgeW - 6;
             int badgeY = panelY + (HEADER_HEIGHT - badgeH) / 2;
 
-            // Store bounds for click detection
             countBadgeBounds = new Rectangle(badgeX, badgeY, badgeW, badgeH);
 
             g.setColor(partyMode ? withAlpha(partyColor(0.7f), 80) : new Color(80, 65, 45, 180));
             g.fillRoundRect(badgeX, badgeY, badgeW, badgeH, 8, 8);
             g.setColor(partyMode ? partyColor(0.7f) : new Color(140, 125, 95));
             g.drawRoundRect(badgeX, badgeY, badgeW, badgeH, 8, 8);
-            g.setColor(partyMode ? partyColor(0.9f) : SECTION_COLOR);
+            g.setColor(partyMode ? partyColor(0.9f) : liveSectionColor);
             g.drawString(countBadge, badgeX + 5, badgeY + badgeH - 4);
 
             g.setFont(titleFont);
@@ -721,7 +742,7 @@ public class CollectionLogOverlay extends Overlay
         g.fillRect(x + 2, y, w - 4, SECTION_HEIGHT - 2);
 
         g.setFont(font);
-        g.setColor(partyMode ? partyColor(itemIndex * 0.05f + 0.2f) : SECTION_COLOR);
+        g.setColor(partyMode ? partyColor(itemIndex * 0.05f + 0.2f) : liveSectionColor);
         String arrow = collapsed ? "\u25B8" : "\u25BE";
         g.drawString(arrow, x + PADDING + 2, y + SECTION_HEIGHT - 9);
 
@@ -798,24 +819,26 @@ public class CollectionLogOverlay extends Overlay
             g.fillRect(x + 4, y, w - 8, ROW_HEIGHT - 1);
         }
 
-        if (greyed)
+        // Apply foreground opacity. Greyed items get their own reduced alpha on top.
+        float rowAlpha = greyed ? liveFgAlpha * 0.35f : liveFgAlpha;
+        if (rowAlpha < 0.99f)
         {
-            g.setComposite(AlphaComposite.getInstance(AlphaComposite.SRC_OVER, 0.35f));
+            g.setComposite(AlphaComposite.getInstance(AlphaComposite.SRC_OVER, Math.max(0f, Math.min(1f, rowAlpha))));
         }
 
         int iconX = x + PADDING + 6;
         int iconY = y + (ROW_HEIGHT - ICON_SIZE) / 2;
 
-        g.setColor(item.isObtained() ? ICON_OBTAINED_BG : ICON_BG);
+        g.setColor(item.isObtained() ? withAlpha(liveObtainedColor, 60) : ICON_BG);
         g.fillRect(iconX, iconY, ICON_SIZE, ICON_SIZE);
 
         if (item.isObtained() && !partyMode)
         {
-            g.setColor(ITEM_OBTAINED);
+            g.setColor(liveObtainedColor);
         }
         else
         {
-            g.setColor(partyMode ? partyColor(globalIndex * 0.07f) : BORDER_COLOR);
+            g.setColor(partyMode ? partyColor(globalIndex * 0.07f) : liveBorderColor);
         }
         g.drawRect(iconX, iconY, ICON_SIZE, ICON_SIZE);
 
@@ -857,7 +880,7 @@ public class CollectionLogOverlay extends Overlay
         }
         else
         {
-            g.setColor(greyed ? ITEM_GREY : ITEM_COLOR);
+            g.setColor(greyed ? ITEM_GREY : liveItemColor);
             g.drawString(item.getDisplayName(), textX, textY);
         }
 
@@ -866,7 +889,7 @@ public class CollectionLogOverlay extends Overlay
             String countBadge = "x" + item.getObtainedCount();
             int nameWidth = fm.stringWidth(item.getDisplayName());
             int badgeX = textX + nameWidth + 4;
-            g.setColor(ITEM_OBTAINED);
+            g.setColor(liveObtainedColor);
             g.drawString(countBadge, badgeX, textY);
         }
 
@@ -882,7 +905,31 @@ public class CollectionLogOverlay extends Overlay
         }
         g.setColor(rateColor);
         int rateWidth = fm.stringWidth(rarity);
+
+        // #8: F2P-only badge — draw a small "[F2P]" pill to the left of the rarity text
+        int f2pBadgeW = 0;
+        if (item.isF2pOnly() && !partyMode)
+        {
+            Font smallFont = g.getFont().deriveFont(g.getFont().getSize2D() - 1f);
+            g.setFont(smallFont);
+            FontMetrics sfm = g.getFontMetrics();
+            String f2pLabel = "F2P";
+            int badgePadX = 3;
+            int badgeH = sfm.getHeight() - 1;
+            f2pBadgeW = sfm.stringWidth(f2pLabel) + badgePadX * 2 + 4;
+            int badgeX = x + w - rateWidth - PADDING - 4 - f2pBadgeW - 4;
+            int badgeY = y + (ROW_HEIGHT - badgeH) / 2;
+
+            g.setColor(new Color(60, 120, 60, 180));
+            g.fillRoundRect(badgeX, badgeY, f2pBadgeW - 4, badgeH, 3, 3);
+            g.setColor(new Color(100, 200, 100));
+            g.drawRoundRect(badgeX, badgeY, f2pBadgeW - 4, badgeH, 3, 3);
+            g.drawString(f2pLabel, badgeX + badgePadX, badgeY + sfm.getAscent() - 1);
+            g.setFont(font);
+        }
+
         int rateX = x + w - rateWidth - PADDING - 4;
+        g.setColor(rateColor);
 
         if (partyMode)
         {
@@ -894,15 +941,9 @@ public class CollectionLogOverlay extends Overlay
             g.drawString(rarity, rateX, textY);
         }
 
-        if (greyed)
-        {
-            g.setComposite(originalComposite);
-        }
+        // Always restore composite — may have been changed by opacity or greying
+        g.setComposite(originalComposite);
     }
-
-    // ================================================================
-    //  SCROLLBAR
-    // ================================================================
 
     private void renderScrollbar(Graphics2D g, int x, int y, int width, int height)
     {
@@ -956,69 +997,219 @@ public class CollectionLogOverlay extends Overlay
 
     /**
      * Renders a dry-streak probability tooltip near the mouse cursor.
-     * Uses the binomial formula P(X >= 1) = 1 - (1-p)^n where p = drop chance
-     * and n = tracked kill count for this NPC.
+     *
+     * Behaviour depends on whether the player has ever received this specific drop:
+     *
+     * HAS NOT received the drop yet:
+     *   Line 2 — "N kills → X% chance of ≥1 drop"
+     *   Line 3 — "(Y% of players still dry)"   [color-coded by how overdue]
+     *   Line 4 — Dry-without-drop message (optional, from config)
+     *
+     * HAS received the drop (obtained ≥ 1):
+     *   Line 2 — "N kills → you should have ~X drops by now"
+     *   Line 3 — "You have: Y   |   Expected: ~Z"
+     *   Line 4 — Dry-with-drop OR over-rate message (optional, from config)
+     *
+     * Always: line 1 = item name + rarity.
      */
     private void renderDryStreakTooltip(Graphics2D g, NpcDropData.DropItem item, int canvasW, int canvasH)
     {
-        double p = parseDropProbability(item.getRarity());
-        int n = dropData.getKillCount();
+        if (lastMousePoint == null) return;
 
-        if (p <= 0 || n <= 0 || lastMousePoint == null)
+        double p = parseDropProbability(item.getRarity());
+        if (p <= 0 || p >= 1.0) return;
+
+        int n       = (dropData != null) ? dropData.getKillCount() : 0;
+        int obtained = countObtained(item);
+
+        String line1 = item.getName() + "  [" + item.getRarity() + "]";
+        String line2;
+        String line3;
+        String line4 = null;
+        Color  line3Color;
+        Color  line4Color = new Color(200, 190, 160);
+
+        if (n <= 0)
         {
-            return;
+            // No kills tracked — prompt the player
+            line2 = "No kills tracked yet for this NPC.";
+            line3 = "Kill it and loot to start tracking.";
+            line3Color = new Color(160, 150, 130);
+        }
+        else if (obtained <= 0)
+        {
+            // Has never received this drop
+            double prob  = 1.0 - Math.pow(1.0 - p, n);
+            int percent  = (int) Math.round(prob * 100);
+            int stillDry = 100 - percent;
+
+            line2 = n + " kills  \u2192  " + percent + "% chance of \u22651 drop";
+            line3 = "(" + stillDry + "% of players still dry)";
+
+            // Color line 3 by how overdue the player is
+            line3Color = percent >= 99 ? new Color(255, 80,  80)
+                       : percent >= 63 ? new Color(255, 165, 50)
+                                       : new Color(140, 200, 140);
+
+            if (config.showDryMessage())
+            {
+                double expected = n * p;
+                line4 = getDryMessageNoDrop(expected);
+                if (line4 != null)
+                {
+                    double dryMult = (expected > 0.001) ? expected : 0;
+                    line4Color = dryMult >= 2.0 ? new Color(255, 80,  80)
+                               : dryMult >= 1.5 ? new Color(255, 140, 40)
+                                                : new Color(220, 200, 100);
+                }
+            }
+        }
+        else
+        {
+            // Has received the drop — show expected vs actual count
+            double expected    = n * p;
+            int    expectedInt = (int) Math.round(expected);
+
+            line2 = n + " kills  \u2192  you should have ~" + expectedInt + " drop"
+                    + (expectedInt == 1 ? "" : "s") + " by now";
+            line3 = "You have: " + obtained + "   |   Expected: ~" + expectedInt;
+
+            // Color line 3 by over/under rate
+            double ratio = (expected > 0) ? obtained / expected : 1.0;
+            line3Color = ratio >= 1.25 ? new Color(80,  220, 120)
+                       : ratio <= 0.6  ? new Color(255, 140, 50)
+                                       : new Color(200, 200, 140);
+
+            if (config.showDryMessage())
+            {
+                line4 = getDryMessageWithDrop(obtained, expected);
+                if (line4 != null)
+                {
+                    line4Color = ratio >= 1.5 ? new Color(80, 220, 120)
+                               : ratio >= 0.75 ? new Color(200, 200, 140)
+                               : ratio >= 0.4  ? new Color(255, 165, 50)
+                                               : new Color(255, 80,  80);
+                }
+            }
         }
 
-        double dryProbability = 1.0 - Math.pow(1.0 - p, n);
-        int percent = (int) Math.round(dryProbability * 100);
-
-        String line1 = item.getName() + " @ " + item.getRarity();
-        String line2 = n + " kills  \u2192  " + percent + "% chance of >=1 drop";
-        String line3 = percent < 100 ? "(" + (100 - percent) + "% still dry)" : "(Should have dropped by now!)";
-
+        // ---- Layout & draw ----
         Font font = FontManager.getRunescapeSmallFont();
         g.setFont(font);
         FontMetrics fm = g.getFontMetrics();
 
-        int padX = 8;
-        int padY = 5;
-        int lineH = fm.getHeight() + 2;
-        int tipW = Math.max(fm.stringWidth(line1), Math.max(fm.stringWidth(line2), fm.stringWidth(line3))) + padX * 2;
-        int tipH = lineH * 3 + padY * 2;
+        int padX      = 8;
+        int padY      = 5;
+        int lineH     = fm.getHeight() + 2;
+        int lineCount = (line4 != null) ? 4 : 3;
 
-        // Position tooltip above cursor, constrained to canvas
-        int tipX = lastMousePoint.x + 10;
-        int tipY = lastMousePoint.y - tipH - 8;
+        int tipW = fm.stringWidth(line1);
+        tipW = Math.max(tipW, fm.stringWidth(line2));
+        tipW = Math.max(tipW, fm.stringWidth(line3));
+        if (line4 != null) tipW = Math.max(tipW, fm.stringWidth(line4));
+        tipW += padX * 2;
+        int tipH = lineH * lineCount + padY * 2;
+
+        int tipX = lastMousePoint.x + 12;
+        int tipY = lastMousePoint.y - tipH - 10;
         if (tipX + tipW > canvasW - 4) tipX = canvasW - tipW - 4;
-        if (tipY < 4) tipY = lastMousePoint.y + 16;
+        if (tipY < 4) tipY = lastMousePoint.y + 18;
 
         // Shadow
-        g.setColor(new Color(0, 0, 0, 100));
+        g.setColor(new Color(0, 0, 0, 120));
         g.fillRoundRect(tipX + 2, tipY + 2, tipW, tipH, 6, 6);
 
-        // Background and border
+        // Background + border
         g.setColor(TOOLTIP_BG);
         g.fillRoundRect(tipX, tipY, tipW, tipH, 6, 6);
         g.setColor(TOOLTIP_BORDER);
         g.drawRoundRect(tipX, tipY, tipW, tipH, 6, 6);
 
-        // Text
         int tx = tipX + padX;
         int ty = tipY + padY + fm.getAscent();
 
         g.setColor(TOOLTIP_ACCENT);
-        g.drawString(line1, tx, ty);
-        ty += lineH;
+        g.drawString(line1, tx, ty);  ty += lineH;
 
         g.setColor(TOOLTIP_TEXT);
-        g.drawString(line2, tx, ty);
-        ty += lineH;
+        g.drawString(line2, tx, ty);  ty += lineH;
 
-        Color dryColor = percent >= 99 ? new Color(255, 100, 80)
-                       : percent >= 63 ? new Color(255, 165, 50)
-                       : new Color(140, 200, 140);
-        g.setColor(dryColor);
+        g.setColor(line3Color);
         g.drawString(line3, tx, ty);
+
+        if (line4 != null)
+        {
+            ty += lineH;
+            g.setColor(line4Color);
+            g.drawString(line4, tx, ty);
+        }
+    }
+
+    /**
+     * Humorous message when the player HAS NOT received this drop yet.
+     * Thresholds are based on how many expected drops they "should" have had (n * p).
+     *
+     *   expected ≥ 3.0  → "Just go ahead and make a post on reddit."
+     *   expected ≥ 2.5  → "This stopped being funny a while ago."
+     *   expected ≥ 2.0  → "Are you sure this is still worth it?"
+     *   expected ≥ 1.5  → "It'll happen anytime now, right?"
+     *   expected ≥ 0.75 → "You're not dry yet, technically."
+     */
+    private String getDryMessageNoDrop(double expected)
+    {
+        if (expected < 0.75) return null;
+        if (expected >= 3.0) return "Just go ahead and make a post on reddit.";
+        if (expected >= 2.5) return "This stopped being funny a while ago.";
+        if (expected >= 2.0) return "Are you sure this is still worth it?";
+        if (expected >= 1.5) return "It'll happen anytime now, right?";
+        return "You're not dry yet, technically.";
+    }
+
+    /**
+     * Humorous message when the player HAS received this drop at least once.
+     * Uses the obtained/expected ratio to place them on the dry↔lucky spectrum.
+     *
+     * Dry-with-drop (ratio < 0.75):
+     *   ratio < 0.333 → "There goes the Gp/hour."
+     *   ratio < 0.4   → "Might as well take the loss."
+     *   ratio < 0.5   → "Hey, at least you got one."
+     *   ratio < 0.75  → "Hope you didn't need extras."
+     *
+     * On rate (ratio 0.75–1.25):
+     *   → "Deserved."
+     *
+     * Over rate (ratio > 1.25) — same messages as before:
+     *   ratio ≥ 3.0   → "I better not see you ever complain."
+     *   ratio ≥ 2.5   → "Leave some for the rest of us!"
+     *   ratio ≥ 2.0   → "Go ahead and buy a scratcher."
+     *   ratio ≥ 1.5   → "This makes up for that other thing."
+     *   ratio ≥ 1.25  → "This makes up for that other thing."
+     */
+    private String getDryMessageWithDrop(int obtained, double expected)
+    {
+        if (expected < 0.5) return null;
+
+        double ratio = (expected > 0) ? obtained / expected : 1.0;
+
+        if (ratio >= 3.0)  return "I better not see you ever complain.";
+        if (ratio >= 2.5)  return "Leave some for the rest of us!";
+        if (ratio >= 2.0)  return "Go ahead and buy a scratcher.";
+        if (ratio >= 1.5)  return "This makes up for that other thing.";
+        if (ratio >= 0.75) return "Deserved.";
+        if (ratio >= 0.5)  return "Hope you didn't need extras.";
+        if (ratio >= 0.4)  return "Hey, at least you got one.";
+        if (ratio >= 0.333) return "Might as well take the loss.";
+        return "There goes the Gp/hour.";
+    }
+
+    /** Returns the obtainedCount for a specific DropItem instance within current dropData. */
+    private int countObtained(NpcDropData.DropItem target)
+    {
+        if (dropData == null) return 0;
+        for (NpcDropData.DropSection section : dropData.getSections())
+            for (NpcDropData.DropItem item : section.getItems())
+                if (item == target) return item.getObtainedCount();
+        return 0;
     }
 
     /**
@@ -1208,6 +1399,29 @@ public class CollectionLogOverlay extends Overlay
             catch (NumberFormatException ignored) {}
         }
         return RATE_DEFAULT;
+    }
+
+    // ================================================================
+    //  LIVE COLOR REFRESH
+    // ================================================================
+
+    /**
+     * Pulls color/opacity values from config and stores them in instance fields.
+     * Called once per render frame so all sub-methods use consistent values without
+     * each needing to call config themselves.
+     */
+    private void refreshLiveColors()
+    {
+        liveBgColor       = config.colorBackground();
+        liveHeaderBgColor = config.colorHeader();
+        liveBorderColor   = config.colorBorder();
+        liveTitleColor    = config.colorTitle();
+        liveSectionColor  = config.colorSectionHeader();
+        liveItemColor     = config.colorDropText();
+        liveObtainedColor = config.colorObtained();
+
+        liveBgAlpha = Math.max(0f, Math.min(1f, config.backgroundOpacity() / 100f));
+        liveFgAlpha = Math.max(0f, Math.min(1f, config.foregroundOpacity() / 100f));
     }
 
     // ---- Party mode color helpers ----
@@ -1549,6 +1763,28 @@ public class CollectionLogOverlay extends Overlay
         this.collapsedSections.clear();
         this.greyOutUnobtained = config.greyOutUnobtained();
         this.itemClickAreas.clear();
+
+        // #12: Auto-collapse sections where every item has been obtained
+        if (config.autoCollapseCompleted())
+        {
+            for (NpcDropData.DropSection section : data.getSections())
+            {
+                if (section.getItems().isEmpty()) continue;
+                boolean allObtained = true;
+                for (NpcDropData.DropItem item : section.getItems())
+                {
+                    if (!item.isObtained())
+                    {
+                        allObtained = false;
+                        break;
+                    }
+                }
+                if (allObtained)
+                {
+                    collapsedSections.add(section.getName());
+                }
+            }
+        }
 
         // Party Pete always triggers party mode; otherwise 1/1,000,000 chance
         this.partyMode = data.getNpcName().toLowerCase().contains("party pete") || Math.random() < 0.000001;

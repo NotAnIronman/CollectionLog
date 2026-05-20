@@ -477,9 +477,197 @@ public class WikiDropFetcher
 
     /**
      * Parses drop items from a single HTML drop section (between two h2 headings).
-     * Splits by h3/h4 sub-headings and extracts items from each table.
+     *
+     * The OSRS Wiki uses two structural patterns for variant drop tables:
+     *
+     * 1. Plain h3/h4 sub-headings  — e.g. "=== Armed ===" becomes an <h3> in HTML.
+     *    We split the HTML on these and treat each block as a named section.
+     *
+     * 2. Tab widgets (data-tabname) — e.g. Hobgoblin, Goblin, Dagannoth, many multi-form
+     *    bosses. The wiki renders variant tables inside nested <div> elements where the
+     *    tab-panel div carries a data-tabname="Variant name" attribute. Because the content
+     *    of a tab panel contains its own nested divs, a greedy or lazy regex for the closing
+     *    </div> will either overshoot or stop too early. We therefore use a depth-aware
+     *    character-scan (extractTabPanels) that correctly tracks open/close tag nesting.
+     *
+     * Both patterns can appear on the same page (e.g. h3 sections inside a tab).
      */
     private List<NpcDropData.DropSection> parseSingleHtmlDropSection(String sectionHtml, String defaultSectionName)
+    {
+        // ---- Depth-aware tab panel detection ----
+        List<String[]> tabPanels = extractTabPanels(sectionHtml);
+
+        if (!tabPanels.isEmpty())
+        {
+            List<NpcDropData.DropSection> sections = new ArrayList<>();
+            for (String[] panel : tabPanels)
+            {
+                String tabName    = panel[0];
+                String tabContent = panel[1];
+
+                List<NpcDropData.DropSection> tabSections =
+                        parseSectionHtmlIntoSections(tabContent, tabName);
+
+                if (tabSections.size() == 1)
+                {
+                    tabSections.get(0).setName(tabName);
+                }
+                else
+                {
+                    for (NpcDropData.DropSection s : tabSections)
+                    {
+                        if (!s.getName().equals(tabName))
+                        {
+                            s.setName(tabName + " \u2014 " + s.getName());
+                        }
+                    }
+                }
+                sections.addAll(tabSections);
+            }
+            return sections;
+        }
+
+        // ---- Fallback: plain h3/h4 sub-heading split ----
+        return parseSectionHtmlIntoSections(sectionHtml, defaultSectionName);
+    }
+
+    /**
+     * Extracts tab panels from a block of HTML using depth-aware tag scanning.
+     *
+     * The OSRS Wiki has used three different tab structures over time, and live pages
+     * may use any of them depending on when they were last edited:
+     *
+     * Format A — Old Tabber extension (pre-2023):
+     *   <div class="tabbertab" title="Hobgoblin (unarmed)">...</div>
+     *   The variant name is in the {@code title} attribute of a div with class tabbertab.
+     *
+     * Format B — New TabberWikitable extension (2023+):
+     *   <section class="tabber__panel" data-title="Hobgoblin (unarmed)">...</section>
+     *   The variant name is in the {@code data-title} attribute of a section tag.
+     *
+     * Format C — Generic data-tabname (used on some templates):
+     *   <div data-tabname="Hobgoblin (unarmed)">...</div>
+     *
+     * Because all formats use nested HTML elements inside the panel, a simple regex
+     * for the closing tag will fail. We use a depth-aware scanner that counts matching
+     * open/close tags until depth returns to zero.
+     *
+     * @return List of {tabName, tabContent} pairs, in document order. Empty if no tabs found.
+     */
+    private List<String[]> extractTabPanels(String html)
+    {
+        List<String[]> panels = new ArrayList<>();
+
+        // Build a single pattern that matches any of the three formats.
+        // Group 1 = tag name (div|section)
+        // Group 2 = the name value (from whichever attribute was matched)
+        Pattern openTagPattern = Pattern.compile(
+                // Format A: <div class="...tabbertab..." title="Name">
+                "<(div)[^>]*\\bclass=\"[^\"]*tabbertab[^\"]*\"[^>]*\\btitle=\"([^\"]+)\"[^>]*>"
+                + "|<(div)[^>]*\\btitle=\"([^\"]+)\"[^>]*\\bclass=\"[^\"]*tabbertab[^\"]*\"[^>]*>"
+                // Format B: <section ... data-title="Name" ...>
+                + "|<(section)[^>]*\\bdata-title=\"([^\"]+)\"[^>]*>"
+                // Format C: <div ... data-tabname="Name" ...>
+                + "|<(div|section)[^>]*\\bdata-tabname=\"([^\"]+)\"[^>]*>",
+                Pattern.CASE_INSENSITIVE);
+
+        Matcher m = openTagPattern.matcher(html);
+        while (m.find())
+        {
+            // Determine which format matched and extract tag name + tab name
+            String tagName;
+            String tabName;
+
+            if (m.group(1) != null)         // Format A, title before class
+            {
+                tagName = m.group(1).toLowerCase();
+                tabName = m.group(2);
+            }
+            else if (m.group(3) != null)    // Format A, class before title
+            {
+                tagName = m.group(3).toLowerCase();
+                tabName = m.group(4);
+            }
+            else if (m.group(5) != null)    // Format B
+            {
+                tagName = m.group(5).toLowerCase();
+                tabName = m.group(6);
+            }
+            else                             // Format C
+            {
+                tagName = m.group(7).toLowerCase();
+                tabName = m.group(8);
+            }
+
+            tabName = decodeHtmlEntities(tabName.trim());
+            int contentStart = m.end();
+
+            // Walk forward counting open/close pairs for this tag type
+            String openTag  = "<"  + tagName;
+            String closeTag = "</" + tagName;
+            int depth = 1;
+            int i = contentStart;
+
+            while (i < html.length() && depth > 0)
+            {
+                int nextOpen  = indexOfIgnoreCase(html, openTag,  i);
+                int nextClose = indexOfIgnoreCase(html, closeTag, i);
+
+                if (nextClose < 0)
+                {
+                    i = html.length(); // malformed HTML
+                    break;
+                }
+
+                if (nextOpen >= 0 && nextOpen < nextClose)
+                {
+                    // Make sure it's a real tag open (not e.g. <divider>)
+                    int afterOpen = nextOpen + openTag.length();
+                    if (afterOpen < html.length())
+                    {
+                        char c = html.charAt(afterOpen);
+                        if (c == '>' || c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '/')
+                        {
+                            depth++;
+                        }
+                    }
+                    i = nextOpen + openTag.length();
+                }
+                else
+                {
+                    depth--;
+                    if (depth == 0)
+                    {
+                        String content = html.substring(contentStart, nextClose);
+                        if (content.contains("<tr") && content.contains("<td"))
+                        {
+                            panels.add(new String[]{tabName, content});
+                        }
+                    }
+                    i = nextClose + closeTag.length();
+                }
+            }
+        }
+
+        return panels;
+    }
+
+    /** Case-insensitive indexOf for simple literal searches in HTML. */
+    private int indexOfIgnoreCase(String text, String search, int fromIndex)
+    {
+        if (fromIndex >= text.length()) return -1;
+        String lower = text.toLowerCase();
+        String searchLower = search.toLowerCase();
+        return lower.indexOf(searchLower, fromIndex);
+    }
+
+    /**
+     * Splits a block of HTML on h3/h4 headings and parses drop table rows from each chunk.
+     * Returns one DropSection per distinct heading (or one section using defaultSectionName
+     * if there are no sub-headings).
+     */
+    private List<NpcDropData.DropSection> parseSectionHtmlIntoSections(String sectionHtml,
+                                                                         String defaultSectionName)
     {
         List<NpcDropData.DropSection> sections = new ArrayList<>();
 
@@ -542,7 +730,6 @@ public class WikiDropFetcher
                 if (imgMatcher.find())
                 {
                     imageUrl = imgMatcher.group(1);
-                    // Ensure full URL (some may be protocol-relative)
                     if (imageUrl.startsWith("//"))
                     {
                         imageUrl = "https:" + imageUrl;
@@ -562,12 +749,17 @@ public class WikiDropFetcher
                 }
                 if (itemName == null || itemName.isEmpty()) continue;
 
-                // Modern OSRS drops Clue scroll boxes, not raw clue scrolls
+                // #1: Skip "Nothing" pseudo-drops
+                if (itemName.equalsIgnoreCase("Nothing")) continue;
+
+                // #4: Normalize clue scroll / scroll box naming
                 itemName = normalizeClueScrollName(itemName);
 
                 // Cell 2 (index 2): quantity (strip HTML tags, decode entities)
                 String quantity = decodeHtmlEntities(cells.get(2).replaceAll("<[^>]*>", "").trim());
                 quantity = quantity.replace(",", "");
+                // #10: Replace en-dash/em-dash with ASCII hyphen in quantity ranges (e.g. "3–5")
+                quantity = quantity.replace('\u2013', '-').replace('\u2014', '-');
                 if (quantity.isEmpty()) quantity = "1";
 
                 // Cell 3 (index 3): rarity - prefer data-drop-fraction attribute
@@ -586,8 +778,29 @@ public class WikiDropFetcher
                     }
                 }
 
+                // #8: Detect F2P-only drops — wiki renders a "Free-to-play" text or icon
+                // in the members cell (index 4 when present) or as class/title attributes.
+                // We look for the string "Free-to-play" anywhere in the row, or a cell whose
+                // stripped text is "No" (members=No equivalent in rendered HTML).
+                boolean f2pOnly = false;
+                if (cells.size() >= 5)
+                {
+                    String membersCell = decodeHtmlEntities(cells.get(4).replaceAll("<[^>]*>", "").trim());
+                    // "No" means non-members (F2P); "Yes" means members-only
+                    if (membersCell.equalsIgnoreCase("No") || membersCell.equalsIgnoreCase("F2P"))
+                    {
+                        f2pOnly = true;
+                    }
+                }
+                // Also check for the Free-to-play icon alt text anywhere in the row HTML
+                if (!f2pOnly && row.toLowerCase().contains("free-to-play"))
+                {
+                    f2pOnly = true;
+                }
+
                 NpcDropData.DropItem item = new NpcDropData.DropItem(itemName, -1, quantity, rarity);
                 item.setImageUrl(imageUrl);
+                item.setF2pOnly(f2pOnly);
                 currentSection.getItems().add(item);
             }
         }
@@ -779,11 +992,16 @@ public class WikiDropFetcher
 
         name = name.replaceAll("\\[\\[([^\\]|]+)(\\|[^\\]]+)?\\]\\]", "$1");
 
-        // Modern OSRS drops Clue scroll boxes, not raw clue scrolls
+        // #1: Skip "Nothing" pseudo-drops — they are untraceable
+        if (name.equalsIgnoreCase("Nothing")) return null;
+
+        // #4: Normalize clue scroll / scroll box naming (accept both wiki forms)
         name = normalizeClueScrollName(name);
 
+        // #10: Replace en-dash/em-dash in quantity ranges with ASCII hyphen
         String quantity = params.getOrDefault("quantity", "1").trim();
         quantity = quantity.replaceAll("\\{\\{[^}]*\\}\\}", "").trim();
+        quantity = quantity.replace('\u2013', '-').replace('\u2014', '-');
         if (quantity.isEmpty()) quantity = "1";
 
         String rarity = cleanRarity(params.getOrDefault("rarity", "Unknown").trim());
@@ -796,7 +1014,13 @@ public class WikiDropFetcher
             catch (NumberFormatException ignored) {}
         }
 
-        return new NpcDropData.DropItem(name, id, quantity, rarity);
+        // #8: Detect F2P-only drops via members=No parameter
+        String members = params.getOrDefault("members", "").trim();
+        boolean f2pOnly = members.equalsIgnoreCase("No");
+
+        NpcDropData.DropItem item = new NpcDropData.DropItem(name, id, quantity, rarity);
+        item.setF2pOnly(f2pOnly);
+        return item;
     }
 
     private int findMatchingBraces(String text, int start)
@@ -882,26 +1106,42 @@ public class WikiDropFetcher
     }
 
     /**
-     * Renames legacy "Clue scroll (difficulty)" entries to "Clue scroll box (difficulty)"
-     * to reflect the modern OSRS drop mechanic (monsters drop caskets/boxes, not raw scrolls).
-     * Only renames the four variable-difficulty scrolls; "Clue scroll (beginner)" dropped by
-     * specific monsters directly is left unchanged.
+     * Normalizes clue scroll drop names to a consistent canonical form.
+     *
+     * Accepted input forms → canonical output:
+     *   "Clue scroll (easy)"         → "Scroll box (Easy)"
+     *   "Clue scroll box (easy)"     → "Scroll box (Easy)"
+     *   "Scroll box (easy)"          → "Scroll box (Easy)"   (capitalisation fix)
+     *   "Clue scroll (Beginner)"     → "Clue box (Beginner)" (beginner still uses Clue box)
+     *   "Clue box (Beginner)"        → "Clue box (Beginner)" (already correct, normalise case)
+     *
+     * The four variable-difficulty tiers (easy/medium/hard/elite) use "Scroll box".
+     * The beginner tier uses "Clue box" because that is still the in-game item name.
      */
     private String normalizeClueScrollName(String name)
     {
         if (name == null) return null;
-        // Match "Clue scroll (easy/medium/hard/elite)" — case-insensitive
-        if (name.matches("(?i)Clue scroll \\((easy|medium|hard|elite)\\)"))
+
+        // Beginner tier: "Clue scroll (Beginner)" or "Clue box (Beginner)" → "Clue box (Beginner)"
+        Pattern beginnerPattern = Pattern.compile(
+                "(?i)(?:clue\\s+scroll(?:\\s+box)?|clue\\s+box|scroll\\s+box)\\s*\\((beginner)\\)");
+        Matcher beginnerMatcher = beginnerPattern.matcher(name);
+        if (beginnerMatcher.find())
         {
-            // Extract the difficulty word and rebuild as a box name
-            int open = name.indexOf('(');
-            int close = name.indexOf(')');
-            if (open >= 0 && close > open)
-            {
-                String difficulty = name.substring(open + 1, close);
-                return "Clue scroll box (" + difficulty.toLowerCase() + ")";
-            }
+            return "Clue box (Beginner)";
         }
+
+        // Variable tiers (easy/medium/hard/elite): all forms → "Scroll box (Difficulty)"
+        Pattern varPattern = Pattern.compile(
+                "(?i)(?:clue\\s+scroll(?:\\s+box)?|scroll\\s+box)\\s*\\((easy|medium|hard|elite)\\)");
+        Matcher varMatcher = varPattern.matcher(name);
+        if (varMatcher.find())
+        {
+            String difficulty = varMatcher.group(1).substring(0, 1).toUpperCase()
+                              + varMatcher.group(1).substring(1).toLowerCase();
+            return "Scroll box (" + difficulty + ")";
+        }
+
         return name;
     }
 
@@ -912,7 +1152,7 @@ public class WikiDropFetcher
         Matcher fractionMatcher = FRACTION_PATTERN.matcher(rarity);
         if (fractionMatcher.find())
         {
-            return fractionMatcher.group(1).trim() + "/" + fractionMatcher.group(2).trim();
+            return simplifyFraction(fractionMatcher.group(1).trim(), fractionMatcher.group(2).trim());
         }
 
         rarity = rarity.replaceAll("\\{\\{[^}]*\\}\\}", "").trim();
@@ -926,7 +1166,56 @@ public class WikiDropFetcher
         if (lower.startsWith("very rare")) return "Very rare";
         if (lower.startsWith("rare")) return "Rare";
 
+        // Also try to simplify inline fractions like "499/25000" that appear as plain text
+        if (rarity.contains("/"))
+        {
+            String[] parts = rarity.split("/");
+            if (parts.length == 2)
+            {
+                try
+                {
+                    return simplifyFraction(parts[0].trim(), parts[1].trim());
+                }
+                catch (NumberFormatException ignored) {}
+            }
+        }
+
         if (rarity.isEmpty()) return "Unknown";
         return rarity;
+    }
+
+    /**
+     * Simplifies a fraction num/den using GCD reduction.
+     * If the result has numerator 1 it returns "1/X" (clean 1-in-X format).
+     * If not reducible to 1/X it returns the reduced form e.g. "3/128".
+     */
+    private String simplifyFraction(String numStr, String denStr)
+    {
+        try
+        {
+            // Strip commas from numbers like "25,000"
+            long num = Long.parseLong(numStr.replace(",", "").trim());
+            long den = Long.parseLong(denStr.replace(",", "").trim());
+            if (num <= 0 || den <= 0) return numStr + "/" + denStr;
+            long g = gcd(num, den);
+            long sNum = num / g;
+            long sDen = den / g;
+            return sNum + "/" + sDen;
+        }
+        catch (NumberFormatException e)
+        {
+            return numStr + "/" + denStr;
+        }
+    }
+
+    private long gcd(long a, long b)
+    {
+        while (b != 0)
+        {
+            long t = b;
+            b = a % b;
+            a = t;
+        }
+        return a;
     }
 }

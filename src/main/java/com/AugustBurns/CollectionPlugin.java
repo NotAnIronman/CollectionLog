@@ -575,8 +575,6 @@ public class CollectionPlugin extends Plugin
             String npcName = cleanNpcName(event.getTarget());
 
             // Only add "Collection Log" for NPCs that have a combat level.
-            // Non-combat NPCs (shopkeepers, bankers, quest NPCs, etc.) have combatLevel == 0
-            // and never have drop tables on the wiki.
             NPC matchedNpc = null;
             for (NPC npc : client.getNpcs())
             {
@@ -591,14 +589,21 @@ public class CollectionPlugin extends Plugin
                 return;
             }
 
-            // Look up the NPC composition ID from our spawn tracker
+            // #3: If "Require Shift for Menu" is enabled, only add the entry when Shift is held
+            if (config.requireShiftForMenu() && !client.isKeyPressed(net.runelite.api.KeyCode.KC_SHIFT))
+            {
+                return;
+            }
+
             int npcId = recentNpcIds.getOrDefault(npcName.toLowerCase(), -1);
+            final String finalNpcName = npcName;
+            final int finalNpcId = npcId;
 
             client.getMenu().createMenuEntry(-1)
                     .setOption("Collection Log")
                     .setTarget(event.getTarget())
                     .setType(MenuAction.RUNELITE)
-                    .onClick(e -> lookupNpc(npcName, npcId));
+                    .onClick(e -> lookupNpc(finalNpcName, finalNpcId));
         }
     }
 
@@ -611,17 +616,79 @@ public class CollectionPlugin extends Plugin
     {
         NPC npc = event.getNpc();
         String name = npc.getName();
-        if (name != null && !name.isEmpty())
-        {
-            // Track composition ID for wiki disambiguation
-            recentNpcIds.put(name.toLowerCase(), npc.getId());
+        if (name == null || name.isEmpty()) return;
 
-            boolean isNew = knownNpcNames.add(name);
-            if (isNew)
-            {
-                refreshAvailableNames();
-            }
+        // Track composition ID for wiki disambiguation
+        recentNpcIds.put(name.toLowerCase(), npc.getId());
+
+        boolean isNew = knownNpcNames.add(name);
+        if (isNew)
+        {
+            refreshAvailableNames();
         }
+
+        // #11: Auto-preload — silently fetch drop data for nearby combat NPCs
+        // so kill tracking begins immediately without the user opening the log first.
+        if (config.autoPreloadNearbyNpcs()
+                && npc.getCombatLevel() > 0
+                && cacheManager.loadFromCache(name) == null)
+        {
+            final String npcName = name;
+            final int npcId = npc.getId();
+            // Defer the network call off the game thread with a short delay to avoid
+            // flooding the wiki API when entering an area with many new NPCs.
+            new Thread(() ->
+            {
+                try { Thread.sleep(1500 + (int)(Math.random() * 2000)); }
+                catch (InterruptedException ignored) { Thread.currentThread().interrupt(); }
+                silentlyPrefetchDropData(npcName, npcId);
+            }, "cl-expanded-prefetch-" + npcName).start();
+        }
+    }
+
+    /**
+     * Fetches drop data for an NPC in the background without showing the overlay.
+     * Used by auto-preload (#11). Saves to cache so kill tracking can begin.
+     * Does nothing if data is already cached by the time the fetch completes.
+     */
+    private void silentlyPrefetchDropData(String npcName, int npcId)
+    {
+        // Double-check the cache (another thread may have fetched it in the meantime)
+        if (cacheManager.loadFromCache(npcName) != null) return;
+
+        log.debug("Auto-preloading drop data for {}", npcName);
+        wikiDropFetcher.fetchDropTable(npcName, okHttpClient, new WikiDropFetcher.FetchCallback()
+        {
+            @Override
+            public void onSuccess(NpcDropData data)
+            {
+                // Merge any existing obtained status before saving
+                NpcDropData existing = cacheManager.loadFromCache(npcName);
+                if (existing != null)
+                {
+                    mergeObtainedStatus(existing, data);
+                    data.setKillCount(existing.getKillCount());
+                }
+                cacheManager.saveToCache(data);
+                knownNpcNames.add(data.getNpcName());
+                refreshAvailableNames();
+                log.debug("Auto-preloaded {} drops for {}", data.getTotalDropCount(), npcName);
+            }
+
+            @Override
+            public void onError(String errorMessage)
+            {
+                // Silent — no UI for background prefetch failures
+                log.debug("Auto-preload failed for {}: {}", npcName, errorMessage);
+            }
+
+            @Override
+            public void onDisambiguation(String npcName2, List<String> options)
+            {
+                // Disambiguation requires user input — silently skip
+                log.debug("Auto-preload skipped disambiguation for {}", npcName2);
+            }
+        });
     }
 
     // ================================================================
@@ -759,6 +826,54 @@ public class CollectionPlugin extends Plugin
     // ================================================================
     //  KEYBOARD INPUT
     // ================================================================
+
+    /**
+     * Listens for config changes. The "clearDropCache" item acts as a trigger button:
+     * when it flips to true the plugin clears all cached drop data and immediately
+     * resets the value back to false so it behaves like a momentary button press.
+     */
+    @Subscribe
+    public void onConfigChanged(net.runelite.client.events.ConfigChanged event)
+    {
+        if (!event.getGroup().equals("collectionlogexpanded")) return;
+
+        if (event.getKey().equals("clearDropCache") && "true".equals(event.getNewValue()))
+        {
+            // Require the confirmation checkbox to also be ticked
+            if (!config.confirmClearCache())
+            {
+                // Reset the button and tell the user to tick confirm first
+                configManager.setConfiguration("collectionlogexpanded", "clearDropCache", false);
+                clientThread.invokeLater(() ->
+                    client.addChatMessage(
+                        net.runelite.api.ChatMessageType.GAMEMESSAGE,
+                        "",
+                        "<col=ff6600>[Collection Log Expanded]</col> Tick <col=ffffff>'Confirm: I understand this is permanent'</col> first, then tick 'Clear Drop Cache Now'.",
+                        null)
+                );
+                return;
+            }
+
+            cacheManager.clearCache();
+            // Reset both checkboxes
+            configManager.setConfiguration("collectionlogexpanded", "clearDropCache", false);
+            configManager.setConfiguration("collectionlogexpanded", "confirmClearCache", false);
+            log.debug("Drop cache cleared via config button");
+
+            if (overlay.isVisible())
+            {
+                overlay.hide();
+            }
+
+            clientThread.invokeLater(() ->
+                client.addChatMessage(
+                    net.runelite.api.ChatMessageType.GAMEMESSAGE,
+                    "",
+                    "<col=00ff00>[Collection Log Expanded]</col> Drop cache cleared. All obtained marks and kill counts have been removed. Next lookup will fetch fresh data from the wiki.",
+                    null)
+            );
+        }
+    }
 
     @Override
     public void keyPressed(KeyEvent e)

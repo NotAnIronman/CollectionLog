@@ -134,6 +134,8 @@ public class NpcDropData
         private boolean obtained;
         private int obtainedCount;
         private String imageUrl;
+        /** True when this drop only occurs on free-to-play worlds (members=No on wiki). */
+        private boolean f2pOnly;
 
         public DropItem()
         {
@@ -220,6 +222,16 @@ public class NpcDropData
         public void setImageUrl(String imageUrl)
         {
             this.imageUrl = imageUrl;
+        }
+
+        public boolean isF2pOnly()
+        {
+            return f2pOnly;
+        }
+
+        public void setF2pOnly(boolean f2pOnly)
+        {
+            this.f2pOnly = f2pOnly;
         }
 
         /**
