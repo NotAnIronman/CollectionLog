@@ -22,8 +22,6 @@ import java.awt.Rectangle;
 import java.awt.RenderingHints;
 import java.awt.Shape;
 import java.awt.image.BufferedImage;
-import java.net.HttpURLConnection;
-import java.net.URL;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -33,10 +31,12 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 import java.util.function.Consumer;
 import javax.imageio.ImageIO;
+import okhttp3.OkHttpClient;
+import okhttp3.Request;
+import okhttp3.Response;
+import java.io.InputStream;
 
 public class CollectionLogOverlay extends Overlay
 {
@@ -114,14 +114,15 @@ public class CollectionLogOverlay extends Overlay
     @Inject
     private CollectionPluginConfig config;
 
+    @Inject 
+    private OkHttpClient okHttpClient;
+
+    @Inject
+    private ScheduledExecutorService imageDownloadExecutor;
+
     // Passed from plugin (not injected - injection doesn't resolve reliably in overlays)
     private ItemManager itemManager;
     private final Set<Integer> failedImageIds = new HashSet<>();
-
-    // ======== IMAGE CACHE ========
-    // Fixed thread pool caps concurrent wiki image downloads and allows clean shutdown.
-    private static final int WIKI_IMAGE_CACHE_MAX = 200;
-    private final ExecutorService imageDownloadExecutor = Executors.newFixedThreadPool(3);
 
     // Size-bounded LRU cache: evicts oldest entry once over WIKI_IMAGE_CACHE_MAX.
     private final Map<String, BufferedImage> wikiImageCache =
@@ -1330,35 +1331,59 @@ public class CollectionLogOverlay extends Overlay
      */
     private BufferedImage getWikiImage(String imageUrl)
     {
-        if (imageUrl == null || imageUrl.isEmpty()) return null;
-        if (failedImageUrls.contains(imageUrl)) return null;
-
+        if (imageUrl == null || imageUrl.isEmpty())
+        {
+            return null;
+        }
+        if (failedImageUrls.contains(imageUrl))
+        {
+            return null;
+        }
+    
         BufferedImage cached = wikiImageCache.get(imageUrl);
-        if (cached != null) return cached;
-
-        if (pendingImageDownloads.contains(imageUrl)) return null;
-        if (imageDownloadExecutor.isShutdown()) return null;
-
+        if (cached != null)
+        {
+            return cached;
+        }
+    
+        if (pendingImageDownloads.contains(imageUrl))
+        {
+            return null;
+        }
+        if (imageDownloadExecutor.isShutdown())
+        {
+            return null;
+        }
+    
         pendingImageDownloads.add(imageUrl);
         imageDownloadExecutor.submit(() ->
         {
             try
             {
-                URL url = new URL(imageUrl);
-                HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-                conn.setRequestProperty("User-Agent", "RuneLite-collectionlogexpanded/1.0");
-                conn.setConnectTimeout(5000);
-                conn.setReadTimeout(5000);
-                BufferedImage img = ImageIO.read(conn.getInputStream());
-                conn.disconnect();
-
-                if (img != null)
+                Request request = new Request.Builder()
+                    .url(imageUrl)
+                    .header("User-Agent", "RuneLite-collectionlogexpanded/1.0")
+                    .build();
+    
+                try (Response response = okHttpClient.newCall(request).execute())
                 {
-                    wikiImageCache.put(imageUrl, img);
-                }
-                else
-                {
-                    failedImageUrls.add(imageUrl);
+                    if (!response.isSuccessful() || response.body() == null)
+                    {
+                        failedImageUrls.add(imageUrl);
+                        return;
+                    }
+    
+                    InputStream stream = response.body().byteStream();
+                    BufferedImage img = ImageIO.read(stream);
+    
+                    if (img != null)
+                    {
+                        wikiImageCache.put(imageUrl, img);
+                    }
+                    else
+                    {
+                        failedImageUrls.add(imageUrl);
+                    }
                 }
             }
             catch (Exception e)
@@ -1370,7 +1395,7 @@ public class CollectionLogOverlay extends Overlay
                 pendingImageDownloads.remove(imageUrl);
             }
         });
-
+    
         return null;
     }
 
