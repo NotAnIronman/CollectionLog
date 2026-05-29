@@ -50,6 +50,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.TreeSet;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
 
 @Slf4j
 @PluginDescriptor(
@@ -104,6 +105,10 @@ public class CollectionPlugin extends Plugin
 
     @Inject
     private ItemManager itemManager;
+
+    @Inject
+    private ScheduledExecutorService executor;
+
 
     private CollectionPluginPanel panel;
     private NavigationButton navButton;
@@ -607,44 +612,48 @@ public class CollectionPlugin extends Plugin
         }
     }
 
-    // ================================================================
-    //  NPC TRACKING (for local autocomplete)
-    // ================================================================
-
-    @Subscribe
-    public void onNpcSpawned(NpcSpawned event)
-    {
-        NPC npc = event.getNpc();
-        String name = npc.getName();
-        if (name == null || name.isEmpty()) return;
-
-        // Track composition ID for wiki disambiguation
-        recentNpcIds.put(name.toLowerCase(), npc.getId());
-
-        boolean isNew = knownNpcNames.add(name);
-        if (isNew)
+        // ================================================================
+        //  NPC TRACKING (for local autocomplete)
+        // ================================================================
+        
+        @Subscribe
+        public void onNpcSpawned(NpcSpawned event)
         {
-            refreshAvailableNames();
-        }
-
-        // #11: Auto-preload — silently fetch drop data for nearby combat NPCs
-        // so kill tracking begins immediately without the user opening the log first.
-        if (config.autoPreloadNearbyNpcs()
+            NPC npc = event.getNpc();
+            String name = npc.getName();
+            if (name == null || name.isEmpty())
+            {
+                return;
+            }
+        
+            // Track composition ID for wiki disambiguation
+            recentNpcIds.put(name.toLowerCase(), npc.getId());
+        
+            boolean isNew = knownNpcNames.add(name);
+            if (isNew)
+            {
+                refreshAvailableNames();
+            }
+        
+            // Auto-preload — silently fetch drop data for nearby combat NPCs
+            // so kill tracking begins immediately without the user opening the log first.
+            if (config.autoPreloadNearbyNpcs()
                 && npc.getCombatLevel() > 0
                 && cacheManager.loadFromCache(name) == null)
-        {
-            final String npcName = name;
-            final int npcId = npc.getId();
-            // Defer the network call off the game thread with a short delay to avoid
-            // flooding the wiki API when entering an area with many new NPCs.
-            new Thread(() ->
             {
-                try { Thread.sleep(1500 + (int)(Math.random() * 2000)); }
-                catch (InterruptedException ignored) { Thread.currentThread().interrupt(); }
-                silentlyPrefetchDropData(npcName, npcId);
-            }, "cl-expanded-prefetch-" + npcName).start();
+                final String npcName = name;
+                final int npcId = npc.getId();
+        
+                // Defer the network call off the game thread with a short delay to avoid
+                // flooding the wiki API when entering an area with many new NPCs.
+                int delayMs = 1500 + (int) (Math.random() * 2000);
+        
+                executor.schedule(() ->
+                {
+                    silentlyPrefetchDropData(npcName, npcId);
+                }, delayMs, TimeUnit.MILLISECONDS);
+            }
         }
-    }
 
     /**
      * Fetches drop data for an NPC in the background without showing the overlay.
