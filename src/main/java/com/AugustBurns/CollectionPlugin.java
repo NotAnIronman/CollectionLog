@@ -50,7 +50,6 @@ import java.util.Map;
 import java.util.Set;
 import java.util.TreeSet;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.TimeUnit;
 
 @Slf4j
 @PluginDescriptor(
@@ -105,9 +104,6 @@ public class CollectionPlugin extends Plugin
 
     @Inject
     private ItemManager itemManager;
-
-    @Inject
-    private ScheduledExecutorService executor;
 
 
     private CollectionPluginPanel panel;
@@ -643,15 +639,8 @@ public class CollectionPlugin extends Plugin
             {
                 final String npcName = name;
                 final int npcId = npc.getId();
-        
-                // Defer the network call off the game thread with a short delay to avoid
-                // flooding the wiki API when entering an area with many new NPCs.
-                int delayMs = 1500 + (int) (Math.random() * 2000);
-        
-                executor.schedule(() ->
-                {
-                    silentlyPrefetchDropData(npcName, npcId);
-                }, delayMs, TimeUnit.MILLISECONDS);
+
+                silentlyPrefetchDropData(npcName, npcId);
             }
         }
 
