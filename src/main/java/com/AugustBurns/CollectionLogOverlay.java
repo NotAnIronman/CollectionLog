@@ -21,6 +21,7 @@ import java.awt.Point;
 import java.awt.Rectangle;
 import java.awt.RenderingHints;
 import java.awt.Shape;
+import java.awt.event.KeyEvent;
 import java.awt.image.BufferedImage;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -33,9 +34,12 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Consumer;
 import javax.imageio.ImageIO;
+import okhttp3.Call;
+import okhttp3.Callback;
 import okhttp3.OkHttpClient;
 import okhttp3.Request;
 import okhttp3.Response;
+import java.io.IOException;
 import java.io.InputStream;
 
 public class CollectionLogOverlay extends Overlay
@@ -117,9 +121,6 @@ public class CollectionLogOverlay extends Overlay
     @Inject 
     private OkHttpClient okHttpClient;
 
-    @Inject
-    private ScheduledExecutorService imageDownloadExecutor;
-
     // Passed from plugin (not injected - injection doesn't resolve reliably in overlays)
     private ItemManager itemManager;
     private final Set<Integer> failedImageIds = new HashSet<>();
@@ -132,6 +133,7 @@ public class CollectionLogOverlay extends Overlay
                         @Override
                         protected boolean removeEldestEntry(Map.Entry<String, BufferedImage> eldest)
                         {
+                            int WIKI_IMAGE_CACHE_MAX = 3;
                             return size() > WIKI_IMAGE_CACHE_MAX;
                         }
                     });
@@ -1350,32 +1352,37 @@ public class CollectionLogOverlay extends Overlay
         {
             return null;
         }
-        if (imageDownloadExecutor.isShutdown())
-        {
-            return null;
-        }
-    
+
         pendingImageDownloads.add(imageUrl);
-        imageDownloadExecutor.submit(() ->
+
+        Request request = new Request.Builder()
+            .url(imageUrl)
+            .header("User-Agent", "RuneLite-collectionlogexpanded/1.0")
+            .build();
+
+        okHttpClient.newCall(request).enqueue(new Callback()
         {
-            try
+            @Override
+            public void onFailure(Call call, IOException e)
             {
-                Request request = new Request.Builder()
-                    .url(imageUrl)
-                    .header("User-Agent", "RuneLite-collectionlogexpanded/1.0")
-                    .build();
-    
-                try (Response response = okHttpClient.newCall(request).execute())
+                failedImageUrls.add(imageUrl);
+                pendingImageDownloads.remove(imageUrl);
+            }
+
+            @Override
+            public void onResponse(Call call, Response response) throws IOException
+            {
+                try
                 {
                     if (!response.isSuccessful() || response.body() == null)
                     {
                         failedImageUrls.add(imageUrl);
                         return;
                     }
-    
+
                     InputStream stream = response.body().byteStream();
                     BufferedImage img = ImageIO.read(stream);
-    
+
                     if (img != null)
                     {
                         wikiImageCache.put(imageUrl, img);
@@ -1385,14 +1392,15 @@ public class CollectionLogOverlay extends Overlay
                         failedImageUrls.add(imageUrl);
                     }
                 }
-            }
-            catch (Exception e)
-            {
-                failedImageUrls.add(imageUrl);
-            }
-            finally
-            {
-                pendingImageDownloads.remove(imageUrl);
+                catch (Exception e)
+                {
+                    failedImageUrls.add(imageUrl);
+                }
+                finally
+                {
+                    pendingImageDownloads.remove(imageUrl);
+                    response.close();
+                }
             }
         });
     
@@ -1685,18 +1693,18 @@ public class CollectionLogOverlay extends Overlay
     /**
      * Handles a key press when the search bar is focused.
      */
-    public void handleSearchKeyPress(java.awt.event.KeyEvent e)
+    public void handleSearchKeyPress(KeyEvent e)
     {
         switch (e.getKeyCode())
         {
-            case java.awt.event.KeyEvent.VK_BACK_SPACE:
+            case KeyEvent.VK_BACK_SPACE:
                 if (searchText.length() > 0)
                 {
                     searchText.deleteCharAt(searchText.length() - 1);
                     updateSuggestions();
                 }
                 break;
-            case java.awt.event.KeyEvent.VK_ENTER:
+            case KeyEvent.VK_ENTER:
                 String query;
                 if (selectedSuggestion >= 0 && selectedSuggestion < suggestions.size())
                 {
@@ -1714,18 +1722,18 @@ public class CollectionLogOverlay extends Overlay
                 searchText = new StringBuilder();
                 suggestions.clear();
                 break;
-            case java.awt.event.KeyEvent.VK_ESCAPE:
+            case KeyEvent.VK_ESCAPE:
                 searchFocused = false;
                 searchText = new StringBuilder();
                 suggestions.clear();
                 break;
-            case java.awt.event.KeyEvent.VK_UP:
+            case KeyEvent.VK_UP:
                 if (!suggestions.isEmpty())
                 {
                     selectedSuggestion = Math.max(0, selectedSuggestion - 1);
                 }
                 break;
-            case java.awt.event.KeyEvent.VK_DOWN:
+            case KeyEvent.VK_DOWN:
                 if (!suggestions.isEmpty())
                 {
                     selectedSuggestion = Math.min(suggestions.size() - 1, selectedSuggestion + 1);
@@ -1756,7 +1764,6 @@ public class CollectionLogOverlay extends Overlay
      */
     public void shutdown()
     {
-        imageDownloadExecutor.shutdownNow();
         pendingImageDownloads.clear();
         wikiImageCache.clear();
         failedImageUrls.clear();
