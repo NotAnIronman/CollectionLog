@@ -883,7 +883,11 @@ public class CollectionLogOverlay extends Overlay
         }
         else
         {
-            g.setColor(greyed ? ITEM_GREY : liveItemColor);
+            // #2: obtained items should be highlighted the same way the side panel does it,
+            // instead of always using the default item text color.
+            Color nameColor = greyed ? ITEM_GREY
+                    : (item.getObtainedCount() > 0 ? liveObtainedColor : liveItemColor);
+            g.setColor(nameColor);
             g.drawString(item.getDisplayName(), textX, textY);
         }
 
@@ -1020,7 +1024,6 @@ public class CollectionLogOverlay extends Overlay
         if (lastMousePoint == null) return;
 
         double p = parseDropProbability(item.getRarity());
-        if (p <= 0 || p >= 1.0) return;
 
         int n       = (dropData != null) ? dropData.getKillCount() : 0;
         int obtained = countObtained(item);
@@ -1032,7 +1035,21 @@ public class CollectionLogOverlay extends Overlay
         Color  line3Color;
         Color  line4Color = new Color(200, 190, 160);
 
-        if (n <= 0)
+        // #6: Guaranteed ("Always") drops and items whose rarity we can't parse have no
+        // meaningful dry-streak math, but should still show a basic tooltip instead of none.
+        boolean hasDryStreakStats = p > 0 && p < 1.0;
+
+        if (!hasDryStreakStats)
+        {
+            line2 = (obtained > 0)
+                    ? "Obtained " + obtained + " time" + (obtained == 1 ? "" : "s")
+                    : "Not yet obtained.";
+            line3 = (n > 0)
+                    ? n + " kills tracked for this NPC."
+                    : "No kills tracked yet for this NPC.";
+            line3Color = new Color(200, 200, 140);
+        }
+        else if (n <= 0)
         {
             // No kills tracked — prompt the player
             line2 = "No kills tracked yet for this NPC.";
@@ -1357,7 +1374,7 @@ public class CollectionLogOverlay extends Overlay
 
         Request request = new Request.Builder()
             .url(imageUrl)
-            .header("User-Agent", "RuneLite-collectionlogexpanded/1.0")
+            .header("User-Agent", "CollectionLogExpanded/1.2 (https://github.com/NotAnIronman/CollectionLog)")
             .build();
 
         okHttpClient.newCall(request).enqueue(new Callback()

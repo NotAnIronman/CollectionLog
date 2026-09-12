@@ -17,6 +17,7 @@ import net.runelite.client.callback.ClientThread;
 import net.runelite.client.config.ConfigManager;
 import net.runelite.client.eventbus.Subscribe;
 import net.runelite.client.events.NpcLootReceived;
+import net.runelite.client.plugins.loottracker.LootReceived;
 import net.runelite.client.game.ItemManager;
 import net.runelite.client.game.ItemStack;
 import net.runelite.client.input.KeyManager;
@@ -62,12 +63,55 @@ public class CollectionPlugin extends Plugin
         net.runelite.client.input.MouseListener,
         net.runelite.client.input.MouseWheelListener
 {
-    private static final String USER_AGENT = "RuneLite-collectionlogexpanded/1.0 (RuneLite Plugin)";
+    private static final String USER_AGENT = "CollectionLogExpanded/1.2 (https://github.com/NotAnIronman/CollectionLog)";
     private static final String CONFIG_GROUP = "collectionlogexpanded";
     private static final String CONFIG_POS_X = "overlayPosX";
     private static final String CONFIG_POS_Y = "overlayPosY";
     private static final String CONFIG_SIZE_W = "overlaySizeW";
     private static final String CONFIG_SIZE_H = "overlaySizeH";
+
+    // #3: Known non-NPC "reward chest" objects, mapped to their wiki page name.
+    // Kept intentionally small and specific - many chest objects across the game share
+    // generic names like "Chest" for completely unrelated content, so we only match on
+    // names that are distinctly tied to one specific reward source to avoid false positives
+    // (e.g. adding a "Collection Log" option to unrelated bank/quest chests).
+    private static final Map<String, String> CHEST_WIKI_PAGES = new HashMap<>();
+    static
+    {
+        CHEST_WIKI_PAGES.put("lunar chest", "Lunar Chest");
+        CHEST_WIKI_PAGES.put("monumental chest", "Monumental chest");
+    }
+
+    // #3: Some reward chests are literally named just "Chest" (Barrows, Tombs of Amascut)
+    // or something else entirely unrelated to their wiki page title (the Chambers of Xeric
+    // reward chest is called "Crystal" in-game, per its own wiki infobox) - the wiki's
+    // parenthetical/common-name titles only disambiguate the article, not the actual
+    // object. Matching those by name would false-positive on every other unrelated
+    // "Chest"/"Crystal" object in the game, so we match by the object's numeric ID
+    // instead, which is unique per chest. IDs sourced from each chest's wiki infobox.
+    private static final Map<Integer, String> CHEST_OBJECT_IDS = new HashMap<>();
+    static
+    {
+        CHEST_OBJECT_IDS.put(20723, "Chest (Barrows)");
+        CHEST_OBJECT_IDS.put(41696, "Chest (Tombs of Amascut)");
+        CHEST_OBJECT_IDS.put(44786, "Chest (Tombs of Amascut)");
+        CHEST_OBJECT_IDS.put(30027, "Ancient chest");
+    }
+
+    // #3: The loot-tracking side needs a separate lookup, since RuneLite's LootReceived
+    // event reports a source "name" that isn't always the object's display name - e.g.
+    // Barrows loot is reported under "Barrows Chest", not "Chest". Verified against
+    // RuneLite's own docs for Barrows; the raid names for CoX/ToB/ToA are the standard
+    // labels RuneLite uses for those loot sources, but haven't been live-verified.
+    private static final Map<String, String> CHEST_LOOT_SOURCE_NAMES = new HashMap<>();
+    static
+    {
+        CHEST_LOOT_SOURCE_NAMES.put("lunar chest", "Lunar Chest");
+        CHEST_LOOT_SOURCE_NAMES.put("barrows chest", "Chest (Barrows)");
+        CHEST_LOOT_SOURCE_NAMES.put("chambers of xeric", "Ancient chest");
+        CHEST_LOOT_SOURCE_NAMES.put("theatre of blood", "Monumental chest");
+        CHEST_LOOT_SOURCE_NAMES.put("tombs of amascut", "Chest (Tombs of Amascut)");
+    }
 
     @Inject
     private Client client;
@@ -104,6 +148,9 @@ public class CollectionPlugin extends Plugin
 
     @Inject
     private ItemManager itemManager;
+
+    @Inject
+    private java.util.concurrent.ScheduledExecutorService executor;
 
 
     private CollectionPluginPanel panel;
@@ -606,6 +653,35 @@ public class CollectionPlugin extends Plugin
                     .setType(MenuAction.RUNELITE)
                     .onClick(e -> lookupNpc(finalNpcName, finalNpcId));
         }
+        else if (event.getType() == MenuAction.EXAMINE_OBJECT.getId())
+        {
+            // #3: Support a curated set of non-NPC "reward chest" objects (e.g. the Lunar
+            // Chest from Moons of Peril) using the same menu-injection pattern as NPCs.
+            // Some chests (Barrows, ToA) share a generic display name with unrelated
+            // objects, so we fall back to matching by object ID for those.
+            String objectName = cleanNpcName(event.getTarget());
+            String wikiPage = CHEST_WIKI_PAGES.get(objectName.toLowerCase());
+            if (wikiPage == null)
+            {
+                wikiPage = CHEST_OBJECT_IDS.get(event.getIdentifier());
+            }
+            if (wikiPage == null)
+            {
+                return;
+            }
+
+            if (config.requireShiftForMenu() && !client.isKeyPressed(net.runelite.api.KeyCode.KC_SHIFT))
+            {
+                return;
+            }
+
+            final String finalWikiPage = wikiPage;
+            client.getMenu().createMenuEntry(-1)
+                    .setOption("Collection Log")
+                    .setTarget(event.getTarget())
+                    .setType(MenuAction.RUNELITE)
+                    .onClick(e -> lookupNpc(finalWikiPage, -1));
+        }
     }
 
         // ================================================================
@@ -693,6 +769,73 @@ public class CollectionPlugin extends Plugin
     //  LOOT TRACKING (obtained items)
     // ================================================================
 
+    /** Lightweight, already-resolved loot entry that can safely cross threads. */
+    private static final class ResolvedLoot
+    {
+        final int id;
+        final int quantity;
+        final String name;
+
+        ResolvedLoot(int id, int quantity, String name)
+        {
+            this.id = id;
+            this.quantity = quantity;
+            this.name = name;
+        }
+    }
+
+    // #3: Loot from non-NPC sources (reward chests) is published via the broader
+    // LootReceived event rather than NpcLootReceived. We only act on it when the source
+    // name matches one of our curated chests, so this never double-counts NPC kills
+    // (which are already handled by onNpcLootReceived above).
+    @Subscribe
+    public void onLootReceived(LootReceived event)
+    {
+        String sourceName = event.getName();
+        if (sourceName == null)
+        {
+            return;
+        }
+
+        String wikiPage = CHEST_LOOT_SOURCE_NAMES.get(sourceName.toLowerCase());
+        if (wikiPage == null)
+        {
+            return;
+        }
+
+        List<ResolvedLoot> resolvedLoot = new ArrayList<>();
+        for (ItemStack lootItem : event.getItems())
+        {
+            int lootId = lootItem.getId();
+            int lootQty = lootItem.getQuantity();
+            String lootName = null;
+
+            try
+            {
+                ItemComposition comp = itemManager.getItemComposition(lootId);
+                if (comp != null)
+                {
+                    lootName = comp.getName();
+                    if (comp.getNote() != -1)
+                    {
+                        int unnotedId = comp.getLinkedNoteId();
+                        if (unnotedId > 0)
+                        {
+                            lootId = unnotedId;
+                        }
+                    }
+                }
+            }
+            catch (Exception ignored)
+            {
+            }
+
+            resolvedLoot.add(new ResolvedLoot(lootId, lootQty, lootName));
+        }
+
+        executor.execute(() -> processLootAgainstCache(wikiPage, resolvedLoot));
+    }
+
     @Subscribe
     public void onNpcLootReceived(NpcLootReceived event)
     {
@@ -702,23 +845,19 @@ public class CollectionPlugin extends Plugin
             return;
         }
 
-        String npcName = npc.getName();
-        NpcDropData cached = cacheManager.loadFromCache(npcName);
-        if (cached == null)
-        {
-            return;
-        }
-
-        boolean changed = false;
+        final String npcName = npc.getName();
         Collection<ItemStack> loot = event.getItems();
 
+        // Resolve item names/ids here, on the client thread, since ItemManager needs it -
+        // this part is fast and does no disk I/O. The actual cache read/write (which is
+        // what was causing the icon flickering reported in #4) is handed off below.
+        List<ResolvedLoot> resolvedLoot = new ArrayList<>();
         for (ItemStack lootItem : loot)
         {
             int lootId = lootItem.getId();
             int lootQty = lootItem.getQuantity();
-
-            // Get the item's display name for name-based matching
             String lootName = null;
+
             try
             {
                 ItemComposition comp = itemManager.getItemComposition(lootId);
@@ -740,6 +879,32 @@ public class CollectionPlugin extends Plugin
             catch (Exception ignored)
             {
             }
+
+            resolvedLoot.add(new ResolvedLoot(lootId, lootQty, lootName));
+        }
+
+        // #4: loadFromCache/saveToCache do synchronous file I/O. Doing that directly on
+        // the client thread (as before) stalls rendering on every single loot event,
+        // which is what caused icons to visibly flicker - worse for NPCs with larger
+        // drop tables (e.g. Abyssal demons) since their cache files are bigger to read/write.
+        executor.execute(() -> processLootAgainstCache(npcName, resolvedLoot));
+    }
+
+    private void processLootAgainstCache(String npcName, List<ResolvedLoot> resolvedLoot)
+    {
+        NpcDropData cached = cacheManager.loadFromCache(npcName);
+        if (cached == null)
+        {
+            return;
+        }
+
+        boolean changed = false;
+
+        for (ResolvedLoot lootItem : resolvedLoot)
+        {
+            int lootId = lootItem.id;
+            int lootQty = lootItem.quantity;
+            String lootName = lootItem.name;
 
             // Find the best matching drop entry, preferring quantity-specific match
             NpcDropData.DropItem bestMatch = null;
@@ -779,24 +944,18 @@ public class CollectionPlugin extends Plugin
             }
         }
 
-        if (changed)
-        {
-            cacheManager.saveToCache(cached);
-
-            if (overlay.isVisible()
-                    && overlay.getDropData() != null
-                    && npcName.equalsIgnoreCase(overlay.getDropData().getNpcName()))
-            {
-                clientThread.invokeLater(() -> overlay.updateDropData(cached));
-            }
-
-            log.debug("Updated obtained items for {}", npcName);
-        }
-
         // Always increment kill count for any NPC we have cached drop data for.
         // A loot event reliably signals one kill even if no new drops were obtained.
         cached.incrementKillCount();
+
+        // Single save covers both the obtained-count changes and the kill count increment,
+        // instead of writing to disk twice per loot event as before.
         cacheManager.saveToCache(cached);
+
+        if (changed)
+        {
+            log.debug("Updated obtained items for {}", npcName);
+        }
 
         if (overlay.isVisible()
                 && overlay.getDropData() != null

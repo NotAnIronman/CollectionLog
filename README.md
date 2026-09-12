@@ -28,7 +28,14 @@
 * Added ability to reset Cache manually
 * Added ability to auto-collapse completed sections of log
 * Added ability to automatically add all enemies you have seen to your drop log.
-  
+
+## Update V1.3 - 09/12/26
+* Fixed OSRS Wiki API returning error 403 on all requests (the wiki was rejecting the plugin's User-Agent header)
+* Fixed icon flickering when receiving a drop with the interface open (moved cache read/write off the game thread)
+* Fixed missing hover tooltip on guaranteed ("Always") drops and a few other items
+* Fixed obtained items not turning green in the floating overlay (was already working in the side panel)
+* Added Collection Log support for the Lunar Chest (Moons of Peril) - more non-NPC reward sources may be added over time
+
 ## Planned Updates
 * Better detection for enemies with multiple variants, such as Hobgoblins
 

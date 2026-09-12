@@ -28,7 +28,7 @@ import java.util.regex.Pattern;
 public class WikiDropFetcher
 {
     private static final String WIKI_API_URL = "https://oldschool.runescape.wiki/api.php";
-    private static final String USER_AGENT = "RuneLite-collectionlogexpanded/1.0 (RuneLite Plugin; https://github.com/runelite)";
+    private static final String USER_AGENT = "CollectionLogExpanded/1.2 (https://github.com/NotAnIronman/CollectionLog)";
 
     private static final Pattern DROPS_LINE_PATTERN = Pattern.compile("\\{\\{DropsLine", Pattern.CASE_INSENSITIVE);
     private static final Pattern SECTION_HEADER_PATTERN = Pattern.compile("^={3,4}\\s*(.+?)\\s*={3,4}$", Pattern.MULTILINE);
@@ -451,7 +451,9 @@ public class WikiDropFetcher
         for (int i = 0; i < allH2.size(); i++)
         {
             String text = allH2Text.get(i);
-            if (text.toLowerCase().contains("drop"))
+            // #3: Reward-chest pages (e.g. Lunar Chest) use headings like "Rewards" instead
+            // of "Drops" - match both so non-NPC loot sources are picked up too.
+            if (text.toLowerCase().contains("drop") || text.toLowerCase().contains("reward") || text.toLowerCase().contains("loot"))
             {
                 int start = allH2.get(i)[1]; // Start after the h2 closing tag
                 int end = (i + 1 < allH2.size()) ? allH2.get(i + 1)[0] : html.length();
@@ -652,6 +654,24 @@ public class WikiDropFetcher
         return panels;
     }
 
+    /**
+     * Returns true if the given rarity text is plain enough to display as-is (a simple
+     * "N/M" fraction, or a known keyword like "Always"/"Common"). Returns false for
+     * compound or conditional rates (e.g. "6 x 5/30") that should be shown as "Varies"
+     * instead of a confusing raw fragment.
+     */
+    private boolean isSimpleRarityText(String text)
+    {
+        String lower = text.toLowerCase().trim();
+        if (lower.equals("always") || lower.equals("common") || lower.equals("uncommon")
+                || lower.equals("rare") || lower.equals("very rare") || lower.equals("unknown"))
+        {
+            return true;
+        }
+        // A plain "N/M" fraction, optionally with commas in the numbers (e.g. "1/1,000")
+        return text.matches("[\\d,]+\\s*/\\s*[\\d,]+");
+    }
+
     /** Case-insensitive indexOf for simple literal searches in HTML. */
     private int indexOfIgnoreCase(String text, String search, int fromIndex)
     {
@@ -774,7 +794,12 @@ public class WikiDropFetcher
                     String rarityText = decodeHtmlEntities(cells.get(3).replaceAll("<[^>]*>", "").trim());
                     if (!rarityText.isEmpty())
                     {
-                        rarity = rarityText;
+                        // #3: Reward-chest pages sometimes show compound/conditional rarities
+                        // (e.g. "6 x 5/30" for a chest that rolls a table multiple times) instead
+                        // of a plain data-drop-fraction attribute we can parse precisely. Rather
+                        // than show a confusing raw fragment, fall back to "Varies" - the same
+                        // simplification the wiki itself uses for genuinely complex mechanics.
+                        rarity = isSimpleRarityText(rarityText) ? rarityText : "Varies";
                     }
                 }
 
@@ -909,9 +934,10 @@ public class WikiDropFetcher
     {
         List<NpcDropData.DropSection> allSections = new ArrayList<>();
 
-        // Match any h2 heading containing "drop" anywhere (covers Drops, Drop table 1,
-        // Level 92 drops, Wilderness Slayer Cave drops, etc.)
-        Pattern dropH2 = Pattern.compile("^==\\s*([^=]*[Dd]rop[^=]*)\\s*==", Pattern.MULTILINE);
+        // Match any h2 heading containing "drop", "reward", or "loot" anywhere (covers Drops,
+        // Drop table 1, Level 92 drops, Wilderness Slayer Cave drops, chest pages like Lunar
+        // Chest's "Rewards" heading, and chest pages like Monumental chest's "Loot table").
+        Pattern dropH2 = Pattern.compile("^==\\s*([^=]*(?:[Dd]rop|[Rr]eward|[Ll]oot)[^=]*)\\s*==", Pattern.MULTILINE);
         Matcher matcher = dropH2.matcher(wikitext);
 
         List<String> headings = new ArrayList<>();
@@ -951,7 +977,10 @@ public class WikiDropFetcher
      */
     private String findAllDropsText(String wikitext)
     {
-        Pattern dropH2 = Pattern.compile("^==\\s*[^=]*[Dd]rop[^=]*==", Pattern.MULTILINE);
+        // #3: Reward-chest pages (e.g. Lunar Chest, Monumental chest) use headings like
+        // "Rewards" or "Loot table" instead of "Drops" - match all three so non-NPC loot
+        // sources are picked up too.
+        Pattern dropH2 = Pattern.compile("^==\\s*[^=]*(?:[Dd]rop|[Rr]eward|[Ll]oot)[^=]*==", Pattern.MULTILINE);
         Matcher matcher = dropH2.matcher(wikitext);
 
         StringBuilder allText = new StringBuilder();
